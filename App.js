@@ -1,15 +1,19 @@
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { addDoc, arrayRemove, arrayUnion, collection, deleteDoc, doc, getDocs, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
-import { useEffect, useState } from 'react';
+import { BlurView } from 'expo-blur';
+import { addDoc, arrayRemove, arrayUnion, collection, deleteDoc, doc, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
+import { useEffect, useRef, useState } from 'react';
 import {
   Animated,
   KeyboardAvoidingView,
   LayoutAnimation,
   Modal,
-  Platform, RefreshControl,
+  Platform,
+  Pressable,
+  RefreshControl,
   ScrollView,
   Share,
+  StatusBar,
   StyleSheet,
   Switch,
   Text,
@@ -20,33 +24,41 @@ import {
 import { SwipeListView } from 'react-native-swipe-list-view';
 import { db } from './firebaseConfig';
 
-// NEW: Notification Imports
 import * as Device from 'expo-device';
+import * as Haptics from 'expo-haptics';
 import * as Notifications from 'expo-notifications';
 
-// Tell the phone to show alerts even if the app is open
 Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: true,
-    shouldSetBadge: false,
-  }),
+  handleNotification: async () => ({ shouldShowAlert: true, shouldPlaySound: true, shouldSetBadge: false }),
 });
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 
+const AVATAR_COLORS = [
+  '#000000', // Noir
+  '#3B82F6', // Blue
+  '#8B5CF6', // Purple
+  '#EC4899', // Pink
+  '#10B981', // Emerald
+  '#F59E0B', // Amber
+  '#EF4444', // Red
+  '#14B8A6', // Teal
+];
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('feed'); 
   const [notices, setNotices] = useState([]);
+  const [isLoading, setIsLoading] = useState(true); 
+  
   const [searchQuery, setSearchQuery] = useState('');
   const [activeFilter, setActiveFilter] = useState('All'); 
-  const [sortBy, setSortBy] = useState('newest'); 
   const [savedNotices, setSavedNotices] = useState([]); 
   const [selectedNotice, setSelectedNotice] = useState(null); 
   const [refreshing, setRefreshing] = useState(false);
   const [isDarkMode, setIsDarkMode] = useState(true); 
+  
   const [toast, setToast] = useState({ visible: false, message: '', type: 'success' });
   const [toastAnim] = useState(new Animated.Value(-100));
   
@@ -56,18 +68,36 @@ export default function App() {
   
   const [userName, setUserName] = useState('');
   const [tempName, setTempName] = useState('');
-  const [showNameModal, setShowNameModal] = useState(false);
-  const [isEditingProfile, setIsEditingProfile] = useState(false); 
+  const [password, setPassword] = useState(''); 
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authMode, setAuthMode] = useState(null); 
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [userColor, setUserColor] = useState(AVATAR_COLORS[1]);
+
+  const scrollY = useRef(new Animated.Value(0)).current;
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const navAnimFeed = useRef(new Animated.Value(1)).current;
+  const navAnimProfile = useRef(new Animated.Value(1)).current;
+  const listRef = useRef(null); 
 
   const theme = isDarkMode ? {
-    bg: '#0a0a0a', card: '#161616', text: '#ffffff', subText: '#888888', border: '#2a2a2a', input: '#1a1a1a', nav: '#111111'
+    bg: '#000000', surface: '#0A0A0A', card: '#141414', text: '#FFFFFF', subText: '#888888', 
+    border: '#222222', primary: userColor, accent: '#8B5CF6', danger: '#EF4444', warning: '#F59E0B'
   } : {
-    bg: '#f3f4f6', card: '#ffffff', text: '#111827', subText: '#6b7280', border: '#e5e7eb', input: '#f9fafb', nav: '#ffffff'
+    bg: '#F4F5F7', surface: '#FFFFFF', card: '#FFFFFF', text: '#0F172A', subText: '#64748B', 
+    border: '#E2E8F0', primary: userColor, accent: '#7C3AED', danger: '#DC2626', warning: '#D97706'
   };
 
   useEffect(() => {
     loadLocalData();
-    registerForPushNotificationsAsync(); // NEW: Ask for notification permission on load
+    registerForPushNotificationsAsync();
+    
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, { toValue: 0.5, duration: 1000, useNativeDriver: true }),
+        Animated.timing(pulseAnim, { toValue: 1, duration: 1000, useNativeDriver: true })
+      ])
+    ).start();
 
     const q = query(collection(db, 'notices'), orderBy('createdAt', 'desc'));
     const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -76,167 +106,204 @@ export default function App() {
       }));
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       setNotices(noticesData);
+      setIsLoading(false); 
     });
     return () => unsubscribe();
   }, []);
 
-  // NEW: Register Device for Push Notifications
   async function registerForPushNotificationsAsync() {
     let token;
     if (Device.isDevice) {
       const { status: existingStatus } = await Notifications.getPermissionsAsync();
       let finalStatus = existingStatus;
-      if (existingStatus !== 'granted') {
-        const { status } = await Notifications.requestPermissionsAsync();
-        finalStatus = status;
-      }
+      if (existingStatus !== 'granted') finalStatus = (await Notifications.requestPermissionsAsync()).status;
       if (finalStatus !== 'granted') return;
-      token = (await Notifications.getExpoPushTokenAsync({
-        projectId: "your-expo-project-id-here", // Works without this in Expo Go, needed for EAS Build later
-      })).data;
-
-      // Save this device's token to Firebase so we know who to message!
-      if (token) {
-        await setDoc(doc(db, 'pushTokens', token), { token: token, createdAt: serverTimestamp() }, { merge: true });
-      }
+      token = (await Notifications.getExpoPushTokenAsync({ projectId: "your-expo-project-id-here" })).data;
+      if (token) await setDoc(doc(db, 'pushTokens', token), { token: token, createdAt: serverTimestamp() }, { merge: true });
     }
   }
 
-  // NEW: Blast Notification to all devices
-  const sendPushNotification = async (noticeTitle, noticeCategory) => {
-    try {
-      const tokensSnapshot = await getDocs(collection(db, 'pushTokens'));
-      const messages = [];
-
-      tokensSnapshot.forEach((doc) => {
-        messages.push({
-          to: doc.data().token,
-          sound: 'default',
-          title: `New GCUF ${noticeCategory} Notice! 📢`,
-          body: noticeTitle,
-          data: { someData: 'goes here' },
-        });
-      });
-
-      await fetch('https://exp.host/--/api/v2/push/send', {
-        method: 'POST',
-        headers: { Accept: 'application/json', 'Accept-encoding': 'application/json', 'Content-Type': 'application/json' },
-        body: JSON.stringify(messages),
-      });
-    } catch (error) { console.log('Error sending push', error); }
-  };
-
   const loadLocalData = async () => {
-    try {
-      const storedName = await AsyncStorage.getItem('@user_name');
-      const storedTheme = await AsyncStorage.getItem('@dark_mode');
-      const storedSaves = await AsyncStorage.getItem('@saved_notices');
-      
-      if (storedName) setUserName(storedName);
-      else setShowNameModal(true);
-      if (storedTheme !== null) setIsDarkMode(JSON.parse(storedTheme));
-      if (storedSaves !== null) setSavedNotices(JSON.parse(storedSaves));
-    } catch (e) { console.log(e); }
-  };
-
-  const saveUserName = async () => {
-    if (tempName.trim() === '') return showToast('Please enter a name.', 'error');
-    await AsyncStorage.setItem('@user_name', tempName.trim());
-    setUserName(tempName.trim());
-    setShowNameModal(false);
-    setIsEditingProfile(false);
-    showToast(`Welcome back, ${tempName.trim()}!`);
-  };
-
-  const showToast = (message, type = 'success') => {
-    setToast({ visible: true, message, type });
-    Animated.spring(toastAnim, { toValue: Platform.OS === 'ios' ? 50 : 20, useNativeDriver: true }).start();
-    setTimeout(() => {
-      Animated.timing(toastAnim, { toValue: -100, duration: 300, useNativeDriver: true }).start(() => {
-        setToast({ visible: false, message: '', type: 'success' });
-      });
-    }, 3000);
-  };
-
-  const isVerifiedAdmin = (name) => {
-    const safeName = name ? name.toUpperCase().trim() : '';
-    return safeName === 'ASAD' || safeName === 'MUTARF';
-  };
-
-  const toggleTheme = async () => {
-    const newTheme = !isDarkMode;
-    setIsDarkMode(newTheme);
-    await AsyncStorage.setItem('@dark_mode', JSON.stringify(newTheme));
-  };
-
-  const toggleBookmark = async (id) => {
-    let newSaves;
-    if (savedNotices.includes(id)) {
-      newSaves = savedNotices.filter(saveId => saveId !== id);
-      showToast('Removed from Bookmarks', 'error');
+    const storedName = await AsyncStorage.getItem('@user_name');
+    const storedRole = await AsyncStorage.getItem('@user_role');
+    const storedTheme = await AsyncStorage.getItem('@dark_mode');
+    const storedSaves = await AsyncStorage.getItem('@saved_notices');
+    const storedColor = await AsyncStorage.getItem('@user_color'); 
+    
+    if (storedName) {
+      setUserName(storedName);
+      setIsAdmin(storedRole === 'admin');
     } else {
-      newSaves = [...savedNotices, id];
-      showToast('Saved to Bookmarks');
+      setShowAuthModal(true);
     }
-    setSavedNotices(newSaves);
-    await AsyncStorage.setItem('@saved_notices', JSON.stringify(newSaves));
+    if (storedTheme !== null) setIsDarkMode(JSON.parse(storedTheme));
+    if (storedSaves !== null) setSavedNotices(JSON.parse(storedSaves));
+    if (storedColor !== null) setUserColor(storedColor);
   };
 
-  const togglePin = async (item) => {
-    if (!isVerifiedAdmin(userName)) return;
-    try {
-      await updateDoc(doc(db, 'notices', item.id), { isPinned: !item.isPinned });
-      showToast(item.isPinned ? 'Notice Unpinned' : 'Notice Pinned to Top!');
-    } catch (error) { showToast('Error pinning notice', 'error'); }
+  const changeUserColor = async (color) => {
+    Haptics.selectionAsync();
+    setUserColor(color);
+    await AsyncStorage.setItem('@user_color', color);
   };
 
-  const publishNotice = async () => {
-    if (title.trim() === '' || description.trim() === '') return showToast('Fill all fields.', 'error');
-    try {
-      await addDoc(collection(db, 'notices'), {
-        title, description, category, author: userName, likedBy: [], isPinned: false, createdAt: serverTimestamp(),
-      });
-      
-      // NEW: Trigger the push notification blast!
-      sendPushNotification(title, category);
-
-      setTitle(''); setDescription(''); setActiveTab('feed'); setActiveFilter('All');
-      showToast('Notice published successfully!');
-    } catch (error) { showToast('Could not publish.', 'error'); }
+  const handleFilterSelect = (filter) => {
+    Haptics.selectionAsync();
+    setActiveFilter(filter);
+    if (listRef.current) listRef.current.scrollToOffset({ offset: 0, animated: true });
   };
 
-  const deleteNotice = async (id) => {
-    try {
-      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-      await deleteDoc(doc(db, 'notices', id));
-      showToast('Notice deleted.', 'error');
-    } catch (error) {}
-  };
-
-  const likeNotice = async (item) => {
-    const noticeRef = doc(db, 'notices', item.id);
-    const hasLiked = item.likedBy.includes(userName);
-    try { await updateDoc(noticeRef, { likedBy: hasLiked ? arrayRemove(userName) : arrayUnion(userName) }); } 
-    catch (error) {}
-  };
-
-  const shareNotice = async (title, desc) => {
-    try { await Share.share({ message: `*GCUF Notice Board*\n\n📌 ${title}\n\n${desc}\n\nShared via Campus App` }); } 
-    catch (error) {}
-  };
-
-  const onRefresh = () => {
-    setRefreshing(true);
-    setTimeout(() => setRefreshing(false), 1000);
-  };
-
+  // --------------------------------------------------------
+  // THE BUG FIX: Re-adding the missing timeAgo function
+  // --------------------------------------------------------
   const timeAgo = (timestamp) => {
-    if (!timestamp) return 'Just now';
+    if (!timestamp || !timestamp.toDate) return 'Just now';
     const seconds = Math.floor((new Date() - timestamp.toDate()) / 1000);
     if (seconds / 86400 > 1) return Math.floor(seconds / 86400) + 'd ago';
     if (seconds / 3600 > 1) return Math.floor(seconds / 3600) + 'h ago';
     if (seconds / 60 > 1) return Math.floor(seconds / 60) + 'm ago';
     return 'Just now';
+  };
+
+  const getGreeting = () => {
+    const hour = new Date().getHours();
+    if (hour < 12) return 'Good morning';
+    if (hour < 18) return 'Good afternoon';
+    return 'Good evening';
+  };
+
+  const calculateReadTime = (text) => {
+    if (!text) return '1 min read'; 
+    const words = text.trim().split(/\s+/).length;
+    const time = Math.ceil(words / 200); 
+    return `${time} min read`;
+  };
+
+  const handleLogin = async () => {
+    const enteredName = tempName.trim().toUpperCase();
+    if (enteredName === '') {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      return showToast('Please enter your identity.', 'error');
+    }
+
+    if (authMode === 'admin') {
+      if (password.trim() === '') {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+        return showToast('Password is required.', 'error');
+      }
+
+      let isValidAdmin = false;
+      if (enteredName === 'ASAD' && password === '15072003') isValidAdmin = true;
+      if (enteredName === 'MUTARF' && password === '17092005') isValidAdmin = true;
+
+      if (isValidAdmin) {
+        await AsyncStorage.setItem('@user_role', 'admin');
+        setIsAdmin(true);
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        showToast('Admin Protocol Verified');
+      } else {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+        return showToast('Invalid Admin Credentials', 'error');
+      }
+    } else {
+      await AsyncStorage.setItem('@user_role', 'student');
+      setIsAdmin(false);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      showToast(`Welcome, ${tempName.trim()}`);
+    }
+
+    await AsyncStorage.setItem('@user_name', enteredName);
+    setUserName(enteredName);
+    setShowAuthModal(false);
+    setPassword(''); 
+  };
+
+  const showToast = (message, type = 'success') => {
+    setToast({ visible: true, message, type });
+    Animated.spring(toastAnim, { toValue: Platform.OS === 'ios' ? 60 : 40, useNativeDriver: true }).start();
+    setTimeout(() => {
+      Animated.timing(toastAnim, { toValue: -100, duration: 300, useNativeDriver: true }).start(() => setToast({ visible: false, message: '', type: 'success' }));
+    }, 3000);
+  };
+
+  const animateTab = (animRef) => {
+    animRef.setValue(0.8);
+    Animated.spring(animRef, { toValue: 1, friction: 4, tension: 50, useNativeDriver: true }).start();
+  };
+
+  const switchTab = (tab) => {
+    Haptics.selectionAsync();
+    setActiveTab(tab);
+    if (tab === 'feed') animateTab(navAnimFeed);
+    if (tab === 'profile') animateTab(navAnimProfile);
+  };
+
+  const toggleBookmark = async (id) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); 
+    const newSaves = savedNotices.includes(id) ? savedNotices.filter(saveId => saveId !== id) : [...savedNotices, id];
+    setSavedNotices(newSaves);
+    await AsyncStorage.setItem('@saved_notices', JSON.stringify(newSaves));
+    showToast(savedNotices.includes(id) ? 'Removed from Bookmarks' : 'Saved to Bookmarks');
+  };
+
+  const togglePin = async (item) => {
+    if (!isAdmin) return;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+    await updateDoc(doc(db, 'notices', item.id), { isPinned: !item.isPinned });
+    showToast(item.isPinned ? 'Notice Unpinned' : 'Notice Pinned to Top!');
+  };
+
+  const publishNotice = async () => {
+    if (!isAdmin) return;
+    if (title.trim() === '' || description.trim() === '') {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      return showToast('Fill all fields.', 'error');
+    }
+    try {
+      await addDoc(collection(db, 'notices'), { title, description, category, author: userName, likedBy: [], isPinned: false, createdAt: serverTimestamp() });
+      sendPushNotification(title, category);
+      setTitle(''); setDescription(''); setActiveTab('feed'); setActiveFilter('All');
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      showToast('Notice published & notified securely!');
+    } catch (error) { showToast('Could not publish.', 'error'); }
+  };
+
+  const deleteNotice = async (id) => {
+    if (!isAdmin) return;
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    await deleteDoc(doc(db, 'notices', id));
+    showToast('Notice permanently deleted.', 'error');
+  };
+
+  const likeNotice = async (item) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); 
+    const noticeRef = doc(db, 'notices', item.id);
+    const hasLiked = item.likedBy.includes(userName);
+    await updateDoc(noticeRef, { likedBy: hasLiked ? arrayRemove(userName) : arrayUnion(userName) });
+  };
+
+  let lastTap = null;
+  const handleCardPress = (item) => {
+    const now = Date.now();
+    const DOUBLE_PRESS_DELAY = 300;
+    if (lastTap && (now - lastTap) < DOUBLE_PRESS_DELAY) {
+      likeNotice(item); 
+    } else {
+      lastTap = now;
+      setTimeout(() => {
+        if(Date.now() - lastTap >= DOUBLE_PRESS_DELAY) {
+          Haptics.selectionAsync(); 
+          setSelectedNotice(item); 
+        }
+      }, DOUBLE_PRESS_DELAY);
+    }
+  };
+
+  const shareNotice = async (item) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    const message = `🎓 *GCUF OFFICIAL NOTICE* 🎓\n━━━━━━━━━━━━━━━━━━━━━━\n📢 *${item.title}*\n📑 Category: ${item.category}\n\n${item.description}\n\n━━━━━━━━━━━━━━━━━━━━━━\n📱 *Shared via GCUF Connect App*`;
+    try { await Share.share({ message }); } catch (error) {}
   };
 
   let processedNotices = notices.filter(notice => {
@@ -246,82 +313,95 @@ export default function App() {
     return matchesSearch && matchesFilter && matchesBookmarks;
   });
 
-  if (sortBy === 'oldest') processedNotices.reverse();
-  if (sortBy === 'popular') processedNotices.sort((a, b) => (b.likedBy?.length || 0) - (a.likedBy?.length || 0));
-  
   processedNotices.sort((a, b) => {
     if (a.isPinned && !b.isPinned) return -1;
     if (!a.isPinned && b.isPinned) return 1;
     return 0;
   });
 
+  const headerHeight = scrollY.interpolate({ inputRange: [0, 80], outputRange: [Platform.OS === 'ios' ? 140 : 120, Platform.OS === 'ios' ? 100 : 80], extrapolate: 'clamp' });
+  const headerOpacity = scrollY.interpolate({ inputRange: [0, 40], outputRange: [1, 0], extrapolate: 'clamp' });
+  const compactTitleOpacity = scrollY.interpolate({ inputRange: [40, 80], outputRange: [0, 1], extrapolate: 'clamp' });
+
+  const renderSkeleton = () => (
+    <View style={[styles.card, { backgroundColor: theme.card, borderColor: theme.border, borderWidth: 1, opacity: 0.4 }]}>
+      <View style={styles.cardHeader}>
+        <View style={{flexDirection: 'row', alignItems: 'center'}}>
+          <View style={[styles.avatar, {backgroundColor: theme.border}]} />
+          <View>
+            <View style={{width: 100, height: 16, backgroundColor: theme.border, borderRadius: 6, marginBottom: 8}} />
+            <View style={{width: 60, height: 12, backgroundColor: theme.border, borderRadius: 6}} />
+          </View>
+        </View>
+      </View>
+      <View style={{width: '85%', height: 24, backgroundColor: theme.border, borderRadius: 6, marginBottom: 16}} />
+      <View style={{width: '100%', height: 16, backgroundColor: theme.border, borderRadius: 6, marginBottom: 8}} />
+      <View style={{width: '90%', height: 16, backgroundColor: theme.border, borderRadius: 6}} />
+    </View>
+  );
+
   const renderNotice = (data) => {
     const item = data.item;
-    let catColor = '#3b82f6'; let catIcon = 'megaphone';
-    if (item.category === 'Urgent') { catColor = '#ef4444'; catIcon = 'alert-circle'; }
-    if (item.category === 'Event') { catColor = '#10b981'; catIcon = 'calendar'; }
+    let catColor = theme.primary; let catIcon = 'megaphone';
+    if (item.category === 'Urgent') { catColor = theme.danger; catIcon = 'alert-circle'; }
+    if (item.category === 'Event') { catColor = '#10B981'; catIcon = 'calendar'; }
     
     const likeCount = item.likedBy ? item.likedBy.length : 0;
     const hasLiked = item.likedBy && item.likedBy.includes(userName);
     const isSaved = savedNotices.includes(item.id);
-    const isTrending = likeCount >= 3; 
-    const isUserAdmin = isVerifiedAdmin(item.author);
+    const isPostAdmin = item.author === 'ASAD' || item.author === 'MUTARF';
+    const isMyPost = item.author === userName;
 
     return (
-      <View style={[styles.card, { backgroundColor: theme.card, borderColor: item.isPinned ? '#eab308' : theme.border, borderWidth: item.isPinned ? 2 : 1 }]}>
-        <TouchableOpacity activeOpacity={0.7} onPress={() => setSelectedNotice(item)}>
+      <View style={[styles.card, { backgroundColor: theme.card, borderColor: item.isPinned ? theme.warning : theme.border, borderWidth: item.isPinned ? 1.5 : 1 }]}>
+        <Pressable onPress={() => handleCardPress(item)} onLongPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy); toggleBookmark(item.id); }}>
           <View style={styles.cardHeader}>
             <View style={styles.authorRow}>
-              <View style={[styles.avatar, {backgroundColor: isUserAdmin ? '#0ea5e9' : theme.border}]}>
-                <Text style={{color: '#fff', fontWeight: 'bold'}}>{item.author ? item.author.charAt(0).toUpperCase() : 'A'}</Text>
+              <View style={[styles.avatar, {backgroundColor: isMyPost ? theme.primary : (isPostAdmin ? '#8B5CF6' : theme.border)}]}>
+                <Text style={{color: '#fff', fontWeight: '800', fontSize: 18}}>{item.author ? item.author.charAt(0) : 'A'}</Text>
               </View>
               <View>
                 <View style={{flexDirection: 'row', alignItems: 'center'}}>
-                  <Text style={[styles.cardAuthor, {color: theme.text}]}>{item.author || 'Anonymous'}</Text>
-                  {isUserAdmin && <Ionicons name="checkmark-circle" size={15} color="#0ea5e9" style={{marginLeft: 4}} />}
+                  <Text style={[styles.cardAuthor, {color: theme.text}]}>{item.author}</Text>
+                  {isPostAdmin && <Ionicons name="checkmark-circle" size={16} color="#8B5CF6" style={{marginLeft: 4}} />}
                 </View>
-                <View style={{flexDirection: 'row', alignItems: 'center'}}>
-                  {item.isPinned && <Ionicons name="pin" size={12} color="#eab308" style={{marginRight: 4}} />}
-                  <Text style={styles.timeText}>{timeAgo(item.createdAt)}</Text>
+                <View style={{flexDirection: 'row', alignItems: 'center', marginTop: 4}}>
+                  {item.isPinned && <Ionicons name="pin" size={12} color={theme.warning} style={{marginRight: 4}} />}
+                  <Text style={{color: theme.subText, fontSize: 13, fontWeight: '600'}}>{timeAgo(item.createdAt)}</Text>
+                  <Text style={{color: theme.subText, fontSize: 13, fontWeight: '600', marginHorizontal: 6}}>•</Text>
+                  <Text style={{color: theme.subText, fontSize: 13, fontWeight: '600'}}>{calculateReadTime(item.description)}</Text>
                 </View>
               </View>
             </View>
-            <View style={[styles.badge, { backgroundColor: catColor }]}>
-              <Ionicons name={catIcon} size={12} color="#fff" style={{marginRight: 4}} />
-              <Text style={styles.badgeText}>{item.category}</Text>
-            </View>
+            <Animated.View style={[styles.badge, { backgroundColor: catColor + '15' }, item.category === 'Urgent' && { opacity: pulseAnim }]}>
+              <Ionicons name={catIcon} size={14} color={catColor} style={{marginRight: 4}} />
+              <Text style={[styles.badgeText, {color: catColor}]}>{item.category}</Text>
+            </Animated.View>
           </View>
 
-          <Text style={[styles.cardTitle, {color: theme.text}]}>{item.title}</Text>
-          <Text style={[styles.cardDesc, {color: theme.subText}]} numberOfLines={2}>{item.description}</Text>
-          
-          {isTrending && (
-            <View style={styles.trendingBadge}>
-              <Ionicons name="flame" size={14} color="#f59e0b" />
-              <Text style={styles.trendingText}>Trending</Text>
-            </View>
-          )}
-        </TouchableOpacity>
+          <Text style={[styles.cardTitle, {color: theme.text}]} numberOfLines={2}>{item.title}</Text>
+          <Text style={[styles.cardDesc, {color: theme.subText}]} numberOfLines={3}>{item.description}</Text>
+        </Pressable>
 
         <View style={[styles.cardFooter, {borderColor: theme.border}]}>
           <View style={styles.actionRow}>
             <TouchableOpacity style={styles.actionBtn} onPress={() => likeNotice(item)}>
-              <Ionicons name={hasLiked ? "heart" : "heart-outline"} size={22} color={hasLiked ? "#ef4444" : theme.subText} />
-              <Text style={[styles.actionText, hasLiked ? {color: '#ef4444'} : {color: theme.subText}]}>{likeCount}</Text>
+              <Ionicons name={hasLiked ? "heart" : "heart-outline"} size={26} color={hasLiked ? theme.danger : theme.subText} />
+              <Text style={[styles.actionText, hasLiked ? {color: theme.danger} : {color: theme.subText}]}>{likeCount}</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.actionBtn} onPress={() => shareNotice(item.title, item.description)}>
-              <Ionicons name="share-social-outline" size={20} color={theme.subText} />
+            <TouchableOpacity style={styles.actionBtn} onPress={() => shareNotice(item)}>
+              <Ionicons name="share-social-outline" size={24} color={theme.subText} />
             </TouchableOpacity>
           </View>
           
           <View style={styles.actionRow}>
-            {isVerifiedAdmin(userName) && (
+            {isAdmin && (
               <TouchableOpacity style={styles.actionBtn} onPress={() => togglePin(item)}>
-                <Ionicons name={item.isPinned ? "pin" : "pin-outline"} size={22} color={item.isPinned ? "#eab308" : theme.subText} />
+                <Ionicons name={item.isPinned ? "pin" : "pin-outline"} size={26} color={item.isPinned ? theme.warning : theme.subText} />
               </TouchableOpacity>
             )}
             <TouchableOpacity style={styles.actionBtn} onPress={() => toggleBookmark(item.id)}>
-              <Ionicons name={isSaved ? "bookmark" : "bookmark-outline"} size={22} color={isSaved ? "#0ea5e9" : theme.subText} />
+              <Ionicons name={isSaved ? "bookmark" : "bookmark-outline"} size={26} color={isSaved ? theme.primary : theme.subText} />
             </TouchableOpacity>
           </View>
         </View>
@@ -330,296 +410,371 @@ export default function App() {
   };
 
   const renderHiddenItem = (data) => {
-    const isMyPost = data.item.author === userName || isVerifiedAdmin(userName);
-    const isSaved = savedNotices.includes(data.item.id);
-
     return (
       <View style={styles.hiddenCardContainer}>
-        <TouchableOpacity style={[styles.hiddenBtn, styles.hiddenLeft]} onPress={() => toggleBookmark(data.item.id)}>
-          <Ionicons name={isSaved ? "bookmark" : "bookmark-outline"} size={24} color="#fff" />
-          <Text style={styles.hiddenText}>{isSaved ? 'Unsave' : 'Save'}</Text>
-        </TouchableOpacity>
-
-        {isMyPost ? (
-          <TouchableOpacity style={[styles.hiddenBtn, styles.hiddenRight]} onPress={() => deleteNotice(data.item.id)}>
-            <Ionicons name="trash-outline" size={24} color="#fff" />
-            <Text style={styles.hiddenText}>Delete</Text>
+        <View style={{flex: 1}} /> 
+        {isAdmin && (
+          <TouchableOpacity style={[styles.hiddenBtn, {backgroundColor: theme.danger}]} onPress={() => deleteNotice(data.item.id)}>
+            <Ionicons name="trash" size={30} color="#fff" />
           </TouchableOpacity>
-        ) : <View style={styles.hiddenRight} />}
+        )}
       </View>
     );
   };
 
   return (
-    <KeyboardAvoidingView style={[styles.container, {backgroundColor: theme.bg}]} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <View style={[styles.container, {backgroundColor: theme.bg}]}>
+      <StatusBar barStyle={isDarkMode ? "light-content" : "dark-content"} />
       
       {toast.visible && (
-        <Animated.View style={[styles.toast, { transform: [{ translateY: toastAnim }], backgroundColor: toast.type === 'error' ? '#ef4444' : '#10b981' }]}>
-          <Ionicons name={toast.type === 'error' ? "alert-circle" : "checkmark-circle"} size={24} color="#fff" />
+        <Animated.View style={[styles.toast, { transform: [{ translateY: toastAnim }], backgroundColor: toast.type === 'error' ? theme.danger : theme.primary }]}>
+          <Ionicons name={toast.type === 'error' ? "warning" : "checkmark-circle"} size={24} color="#fff" />
           <Text style={styles.toastText}>{toast.message}</Text>
         </Animated.View>
       )}
 
-      <Modal visible={!!selectedNotice} animationType="slide" transparent={true}>
-        <View style={styles.modalOverlay}>
-          <View style={[styles.expandedBox, {backgroundColor: theme.bg, borderColor: theme.border}]}>
-            <TouchableOpacity style={styles.closeBtn} onPress={() => setSelectedNotice(null)}>
-              <Ionicons name="close-circle" size={32} color={theme.subText} />
-            </TouchableOpacity>
-            <ScrollView showsVerticalScrollIndicator={false}>
-              <View style={[styles.badge, { backgroundColor: '#3b82f6', alignSelf: 'flex-start', marginBottom: 15 }]}>
-                <Text style={styles.badgeText}>{selectedNotice?.category}</Text>
-              </View>
-              <Text style={[styles.expandedTitle, {color: theme.text}]}>{selectedNotice?.title}</Text>
-              <Text style={[styles.timeText, {marginBottom: 20}]}>Posted by {selectedNotice?.author} • {timeAgo(selectedNotice?.createdAt)}</Text>
-              <Text style={[styles.expandedDesc, {color: theme.text}]}>{selectedNotice?.description}</Text>
-            </ScrollView>
+      {/* SECURE AUTH MODAL */}
+      <Modal visible={showAuthModal} animationType="slide" transparent={false}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={[styles.authContainer, {backgroundColor: theme.bg}]}>
+          <View style={[styles.iconBlur, {backgroundColor: theme.primary + '15'}]}>
+             <Ionicons name="finger-print" size={80} color={theme.primary} />
           </View>
-        </View>
-      </Modal>
+          <Text style={[styles.authTitle, {color: theme.text}]}>GCUF Connect</Text>
+          <Text style={[styles.authSub, {color: theme.subText}]}>Secure Campus Network</Text>
 
-      <Modal visible={showNameModal || isEditingProfile} animationType="fade" transparent={true}>
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalBox, {backgroundColor: theme.card, borderColor: theme.border}]}>
-            <Ionicons name="school" size={50} color="#0ea5e9" style={{alignSelf: 'center', marginBottom: 10}}/>
-            <Text style={[styles.modalTitle, {color: theme.text}]}>{isEditingProfile ? 'Edit Profile' : 'GCUF Board'}</Text>
-            <Text style={[styles.modalSub, {color: theme.subText}]}>{isEditingProfile ? 'Update your display name' : 'Enter your student name to continue'}</Text>
-            <TextInput style={[styles.input, {backgroundColor: theme.input, color: theme.text, borderColor: theme.border}]} placeholder="Student Full Name" placeholderTextColor={theme.subText} value={tempName} onChangeText={setTempName} />
-            <TouchableOpacity style={styles.publishBtn} onPress={saveUserName}>
-              <Text style={styles.publishBtnText}>Save</Text>
-            </TouchableOpacity>
-            {isEditingProfile && (
-              <TouchableOpacity style={{marginTop: 15, alignItems: 'center'}} onPress={() => setIsEditingProfile(false)}>
-                <Text style={{color: theme.subText, fontWeight: 'bold'}}>Cancel</Text>
+          {!authMode ? (
+            <View style={{width: '100%', marginTop: 50}}>
+              <TouchableOpacity style={[styles.authRoleBtn, {backgroundColor: theme.surface, borderColor: theme.border}]} onPress={() => { Haptics.selectionAsync(); setAuthMode('student'); }}>
+                <Ionicons name="school" size={26} color={theme.primary} />
+                <Text style={[styles.authRoleText, {color: theme.text}]}>Student Portal</Text>
+                <Ionicons name="chevron-forward" size={20} color={theme.subText} />
               </TouchableOpacity>
-            )}
-          </View>
-        </View>
+              
+              <TouchableOpacity style={[styles.authRoleBtn, {backgroundColor: theme.surface, borderColor: theme.border, marginTop: 15}]} onPress={() => { Haptics.selectionAsync(); setAuthMode('admin'); }}>
+                <Ionicons name="shield-checkmark" size={26} color={theme.accent} />
+                <Text style={[styles.authRoleText, {color: theme.text}]}>Administrator Login</Text>
+                <Ionicons name="chevron-forward" size={20} color={theme.subText} />
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <View style={{width: '100%', marginTop: 40}}>
+              <TextInput style={[styles.authInput, {backgroundColor: theme.surface, color: theme.text, borderColor: theme.border, marginBottom: authMode === 'admin' ? 15 : 20}]} placeholder={authMode === 'admin' ? "Administrator ID" : "Enter Full Name"} placeholderTextColor={theme.subText} value={tempName} onChangeText={setTempName} autoCapitalize="characters" />
+              
+              {authMode === 'admin' && (
+                <View style={[styles.passwordContainer, {backgroundColor: theme.surface, borderColor: theme.border}]}>
+                  <Ionicons name="lock-closed" size={20} color={theme.subText} style={{marginLeft: 20}} />
+                  <TextInput style={[styles.passwordInput, {color: theme.text}]} placeholder="Enter Security Pin" placeholderTextColor={theme.subText} value={password} onChangeText={setPassword} secureTextEntry={true} keyboardType="numeric" />
+                </View>
+              )}
+
+              <TouchableOpacity style={[styles.authSubmitBtn, {backgroundColor: authMode === 'admin' ? theme.accent : theme.primary}]} onPress={handleLogin}>
+                <Text style={styles.authSubmitText}>Authenticate</Text>
+              </TouchableOpacity>
+              
+              <TouchableOpacity style={{marginTop: 30, alignItems: 'center', padding: 10}} onPress={() => { Haptics.selectionAsync(); setAuthMode(null); setTempName(''); setPassword(''); }}>
+                <Text style={{color: theme.subText, fontWeight: '700', fontSize: 16}}>Cancel & Go Back</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </KeyboardAvoidingView>
       </Modal>
 
-      <View style={[styles.header, {borderColor: theme.border}]}>
-        <Text style={[styles.headerTitle, {color: theme.text}]}>GCUF Notice Board</Text>
-        <TouchableOpacity onPress={() => setActiveTab('profile')}>
-          <View style={styles.headerAvatar}>
-            <Text style={{color: '#fff', fontWeight: 'bold'}}>{userName.charAt(0)}</Text>
-            {isVerifiedAdmin(userName) && (
-              <View style={styles.adminDot} />
-            )}
+      {/* READING MODAL */}
+      <Modal visible={!!selectedNotice} animationType="fade" transparent={true}>
+        <BlurView intensity={isDarkMode ? 80 : 60} tint={isDarkMode ? "dark" : "light"} style={styles.expandedOverlay}>
+          <View style={{flexDirection: 'row', justifyContent: 'flex-end', paddingTop: Platform.OS === 'ios' ? 60 : 40, paddingHorizontal: 25}}>
+            <TouchableOpacity onPress={() => { Haptics.selectionAsync(); setSelectedNotice(null); }}>
+              <View style={{backgroundColor: theme.card, padding: 10, borderRadius: 25}}>
+                <Ionicons name="close" size={28} color={theme.text} />
+              </View>
+            </TouchableOpacity>
           </View>
-        </TouchableOpacity>
-      </View>
+          <ScrollView contentContainerStyle={{padding: 25, paddingTop: 10}}>
+            <View style={[styles.badge, { backgroundColor: theme.primary+'20', alignSelf: 'flex-start', marginBottom: 20, paddingHorizontal: 16, paddingVertical: 8 }]}>
+              <Text style={[styles.badgeText, {color: theme.primary, fontSize: 13}]}>{selectedNotice?.category}</Text>
+            </View>
+            <Text style={[styles.expandedTitle, {color: theme.text}]}>{selectedNotice?.title}</Text>
+            <View style={{flexDirection: 'row', alignItems: 'center', marginBottom: 35, borderBottomWidth: 1, borderColor: theme.border, paddingBottom: 25}}>
+              <View style={[styles.avatar, {backgroundColor: theme.surface, width: 56, height: 56, borderRadius: 28, borderWidth: 1, borderColor: theme.border}]}><Text style={{color: theme.text, fontWeight: '900', fontSize: 20}}>{selectedNotice?.author.charAt(0)}</Text></View>
+              <View style={{marginLeft: 15}}>
+                <Text style={{color: theme.text, fontWeight: '800', fontSize: 18}}>{selectedNotice?.author}</Text>
+                <Text style={{color: theme.subText, marginTop: 4, fontWeight: '600'}}>{timeAgo(selectedNotice?.createdAt)} • {calculateReadTime(selectedNotice?.description)}</Text>
+              </View>
+            </View>
+            <Text style={[styles.expandedDesc, {color: theme.text}]}>{selectedNotice?.description}</Text>
+          </ScrollView>
+        </BlurView>
+      </Modal>
 
+      {/* HEADER */}
+      {activeTab === 'feed' ? (
+        <Animated.View style={[styles.header, { backgroundColor: theme.surface, height: headerHeight, zIndex: 10 }]}>
+          <Animated.View style={{ opacity: headerOpacity }}>
+            <Text style={{color: theme.subText, fontSize: 15, fontWeight: '800', letterSpacing: 0.5}}>{getGreeting()},</Text>
+            <Text style={[styles.headerTitle, {color: theme.text}]}>{userName ? userName.split(' ')[0] : 'Student'}</Text>
+          </Animated.View>
+          
+          <Animated.View style={{position: 'absolute', bottom: 20, left: 25, opacity: compactTitleOpacity}}>
+             <Text style={{color: theme.text, fontSize: 22, fontWeight: '900'}}>Campus Board</Text>
+          </Animated.View>
+
+          <TouchableOpacity onPress={() => switchTab('profile')}>
+            <View style={[styles.headerAvatar, {backgroundColor: theme.primary}]}>
+              <Text style={{color: '#fff', fontWeight: '900', fontSize: 20}}>{userName.charAt(0)}</Text>
+              {isAdmin && <View style={styles.adminDot} />}
+            </View>
+          </TouchableOpacity>
+        </Animated.View>
+      ) : (
+        <View style={[styles.staticHeader, {backgroundColor: theme.surface}]}>
+          <Text style={{color: theme.text, fontSize: 28, fontWeight: '900'}}>{activeTab === 'publish' ? 'New Broadcast' : 'Your Profile'}</Text>
+        </View>
+      )}
+
+      {/* FEED TAB */}
       {activeTab === 'feed' && (
         <View style={styles.screenContainer}>
-          <View style={[styles.searchContainer, {backgroundColor: theme.input, borderColor: theme.border}]}>
-            <Ionicons name="search" size={20} color={theme.subText} style={{marginRight: 10}} />
-            <TextInput style={[styles.searchInput, {color: theme.text}]} placeholder="Search notices..." placeholderTextColor={theme.subText} value={searchQuery} onChangeText={setSearchQuery} />
+          {isLoading ? (
+            <View style={{paddingHorizontal: 20, paddingTop: 20}}>
+              {renderSkeleton()}{renderSkeleton()}
+            </View>
+          ) : (
+            <SwipeListView
+              ref={listRef} 
+              data={processedNotices}
+              keyExtractor={(item) => item.id}
+              renderItem={renderNotice}
+              renderHiddenItem={renderHiddenItem}
+              rightOpenValue={isAdmin ? -90 : 0} 
+              disableRightSwipe={true}
+              initialNumToRender={5}
+              maxToRenderPerBatch={5}
+              windowSize={5}
+              removeClippedSubviews={Platform.OS === 'android'}
+              contentContainerStyle={{paddingHorizontal: 20, paddingBottom: 140, paddingTop: 10}} // Added heavy padding for floating nav
+              
+              onScroll={Animated.event([{nativeEvent: {contentOffset: {y: scrollY}}}], {useNativeDriver: false})}
+              scrollEventThrottle={16}
+              
+              refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); setRefreshing(true); setTimeout(() => setRefreshing(false), 1000);}} tintColor={theme.primary} />}
+              
+              ListHeaderComponent={
+                <View>
+                  <View style={[styles.searchContainer, {backgroundColor: theme.surface, borderColor: theme.border}]}>
+                    <Ionicons name="search" size={22} color={theme.subText} style={{marginRight: 10}} />
+                    <TextInput style={[styles.searchInput, {color: theme.text}]} placeholder="Search updates..." placeholderTextColor={theme.subText} value={searchQuery} onChangeText={setSearchQuery} />
+                  </View>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll}>
+                    {['All', 'General', 'Urgent', 'Event', 'Saved'].map(filter => (
+                      <TouchableOpacity key={filter} style={[styles.filterChip, {backgroundColor: theme.surface, borderColor: theme.border}, activeFilter === filter && {backgroundColor: theme.primary, borderColor: theme.primary}]} onPress={() => handleFilterSelect(filter)}>
+                        <Text style={[styles.filterChipText, {color: theme.subText}, activeFilter === filter && {color: '#fff'}]}>{filter}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </ScrollView>
+                </View>
+              }
+            />
+          )}
+        </View>
+      )}
+
+      {/* PUBLISH TAB */}
+      {activeTab === 'publish' && isAdmin && (
+        <ScrollView style={styles.screenContainer} contentContainerStyle={{padding: 25, paddingBottom: 140}}>
+          <Text style={{color: theme.subText, marginBottom: 30, fontSize: 16, lineHeight: 24}}>Notifications will be securely pushed to all campus devices on the GCUF network.</Text>
+          <TextInput style={[styles.input, {backgroundColor: theme.surface, color: theme.text, borderColor: theme.border}]} placeholder="Enter Headline..." placeholderTextColor={theme.subText} value={title} onChangeText={setTitle} />
+          <TextInput style={[styles.input, {height: 200, textAlignVertical: 'top', backgroundColor: theme.surface, color: theme.text, borderColor: theme.border}]} placeholder="Write complete details here..." placeholderTextColor={theme.subText} multiline value={description} onChangeText={setDescription} />
+          
+          <Text style={[styles.subLabel, {color: theme.text}]}>Priority Level</Text>
+          <View style={styles.categoryRow}>
+            {['General', 'Event', 'Urgent'].map((cat) => {
+               const isActive = category === cat;
+               let activeColor = theme.primary;
+               if(cat === 'Urgent') activeColor = theme.danger;
+               if(cat === 'Event') activeColor = '#10B981';
+
+               return (
+                 <TouchableOpacity key={cat} style={[styles.catBtn, {backgroundColor: theme.surface, borderColor: theme.border}, isActive && {backgroundColor: activeColor+'15', borderColor: activeColor}]} onPress={() => { Haptics.selectionAsync(); setCategory(cat); }}>
+                   <Text style={[{color: theme.subText, fontWeight: '800'}, isActive && {color: activeColor}]}>{cat}</Text>
+                 </TouchableOpacity>
+               )
+            })}
           </View>
           
-          <View>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll}>
-              {['All', 'General', 'Urgent', 'Event', 'Saved'].map(filter => (
-                <TouchableOpacity key={filter} style={[styles.filterChip, {backgroundColor: theme.card, borderColor: theme.border}, activeFilter === filter && {backgroundColor: '#0ea5e9', borderColor: '#0ea5e9'}]} onPress={() => setActiveFilter(filter)}>
-                  <Text style={[styles.filterChipText, {color: theme.subText}, activeFilter === filter && {color: '#fff'}]}>{filter}</Text>
+          <TouchableOpacity style={[styles.publishBtn, {backgroundColor: theme.accent}]} onPress={publishNotice}>
+            <Ionicons name="paper-plane" size={24} color="#fff" style={{marginRight: 10}} />
+            <Text style={styles.publishBtnText}>Dispatch Notice</Text>
+          </TouchableOpacity>
+        </ScrollView>
+      )}
+
+      {/* PROFILE TAB */}
+      {activeTab === 'profile' && (
+        <ScrollView style={styles.screenContainer} contentContainerStyle={{padding: 25, alignItems: 'center', paddingBottom: 140}}>
+          <View style={[styles.bigAvatar, {backgroundColor: theme.primary}]}>
+            <Text style={styles.bigAvatarText}>{userName.charAt(0)}</Text>
+          </View>
+          
+          <View style={{flexDirection: 'row', alignItems: 'center', marginTop: 20}}>
+            <Text style={[styles.profileName, {color: theme.text}]}>{userName}</Text>
+            {isAdmin && <Ionicons name="shield-checkmark" size={30} color="#8B5CF6" style={{marginLeft: 10}} />}
+          </View>
+          <Text style={{color: isAdmin ? '#8B5CF6' : theme.subText, fontSize: 15, fontWeight: '800', marginBottom: 40, letterSpacing: 2, textTransform: 'uppercase'}}>
+            {isAdmin ? 'System Administrator' : 'Verified Student'}
+          </Text>
+
+          <View style={[styles.themeToggleCard, {backgroundColor: theme.surface, borderColor: theme.border, flexDirection: 'column', alignItems: 'flex-start'}]}>
+            <Text style={{color: theme.text, fontWeight: '800', fontSize: 17, marginBottom: 20}}>Profile Color Theme</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{paddingBottom: 5}}>
+              {AVATAR_COLORS.map((color) => (
+                <TouchableOpacity 
+                  key={color} 
+                  onPress={() => changeUserColor(color)}
+                  style={[styles.colorSwatch, {backgroundColor: color, borderColor: theme.text, borderWidth: userColor === color ? 3 : 0}]}
+                >
+                  {userColor === color && <Ionicons name="checkmark" size={20} color="#fff" />}
                 </TouchableOpacity>
               ))}
             </ScrollView>
           </View>
 
-          <View style={styles.sortRow}>
-            <Text style={{color: theme.subText, fontWeight: 'bold', marginRight: 10}}>Sort By:</Text>
-            {['newest', 'oldest', 'popular'].map(sort => (
-              <TouchableOpacity key={sort} onPress={() => setSortBy(sort)}>
-                <Text style={{color: sortBy === sort ? '#0ea5e9' : theme.subText, marginRight: 15, textTransform: 'capitalize'}}>{sort}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          <SwipeListView
-            data={processedNotices}
-            keyExtractor={(item) => item.id}
-            renderItem={renderNotice}
-            renderHiddenItem={renderHiddenItem}
-            leftOpenValue={80} 
-            rightOpenValue={-80} 
-            contentContainerStyle={{paddingHorizontal: 15, paddingBottom: 20}}
-            refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#0ea5e9" />}
-            ListEmptyComponent={
-              <View style={styles.emptyState}>
-                <Ionicons name="document-text-outline" size={60} color={theme.border} />
-                <Text style={{color: theme.subText, fontSize: 18, fontWeight: 'bold', marginTop: 10}}>No notices found.</Text>
-              </View>
-            }
-          />
-        </View>
-      )}
-
-      {activeTab === 'publish' && (
-        <View style={[styles.screenContainer, {padding: 20}]}>
-          <Text style={[styles.sectionTitle, {color: theme.text}]}>Draft New Notice</Text>
-          <TextInput style={[styles.input, {backgroundColor: theme.input, color: theme.text, borderColor: theme.border}]} placeholder="Notice Title" placeholderTextColor={theme.subText} value={title} onChangeText={setTitle} />
-          
-          <TextInput style={[styles.input, {height: 140, textAlignVertical: 'top', backgroundColor: theme.input, color: theme.text, borderColor: theme.border, marginBottom: 5}]} placeholder="Write your announcement..." placeholderTextColor={theme.subText} multiline numberOfLines={5} maxLength={500} value={description} onChangeText={setDescription} />
-          
-          <View style={styles.progressContainer}>
-            <View style={[styles.progressBar, { width: `${(description.length / 500) * 100}%`, backgroundColor: description.length > 450 ? '#ef4444' : '#0ea5e9' }]} />
-          </View>
-          <Text style={[styles.charCount, {color: description.length > 450 ? '#ef4444' : theme.subText}]}>{description.length}/500</Text>
-          
-          <Text style={[styles.subLabel, {color: theme.subText}]}>Category Type:</Text>
-          <View style={styles.categoryRow}>
-            {['General', 'Urgent', 'Event'].map((cat) => (
-              <TouchableOpacity key={cat} style={[styles.catBtn, {backgroundColor: theme.card, borderColor: theme.border}, category === cat && {backgroundColor: '#0ea5e9', borderColor: '#0ea5e9'}]} onPress={() => setCategory(cat)}>
-                <Text style={[{color: theme.subText, fontWeight: 'bold'}, category === cat && {color: '#fff'}]}>{cat}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          <TouchableOpacity style={styles.publishBtn} onPress={publishNotice}>
-            <Ionicons name="paper-plane" size={20} color="#fff" style={{marginRight: 10}} />
-            <Text style={styles.publishBtnText}>Publish & Notify All</Text>
-          </TouchableOpacity>
-        </View>
-      )}
-
-      {activeTab === 'profile' && (
-        <View style={[styles.screenContainer, {padding: 20, alignItems: 'center'}]}>
-          <View style={styles.bigAvatar}>
-            <Text style={styles.bigAvatarText}>{userName.charAt(0)}</Text>
-            {isVerifiedAdmin(userName) && (
-              <View style={[styles.adminDot, {width: 24, height: 24, borderRadius: 12, right: 0, bottom: 0, borderWidth: 3}]} />
-            )}
-          </View>
-          <View style={{flexDirection: 'row', alignItems: 'center'}}>
-            <Text style={[styles.profileName, {color: theme.text}]}>{userName}</Text>
-            {isVerifiedAdmin(userName) && <Ionicons name="checkmark-circle" size={24} color="#0ea5e9" style={{marginLeft: 8}} />}
-          </View>
-          <Text style={{color: theme.subText, fontSize: 16, marginBottom: 15}}>{isVerifiedAdmin(userName) ? 'Verified Administrator' : 'GCUF Student'}</Text>
-          
-          <TouchableOpacity style={[styles.editProfileBtn, {backgroundColor: theme.card, borderColor: theme.border}]} onPress={() => {setTempName(userName); setIsEditingProfile(true);}}>
-            <Ionicons name="pencil" size={16} color={theme.text} />
-            <Text style={{color: theme.text, fontWeight: '600', marginLeft: 6}}>Edit Name</Text>
-          </TouchableOpacity>
-
-          <View style={[styles.themeToggleCard, {backgroundColor: theme.card, borderColor: theme.border}]}>
+          <View style={[styles.themeToggleCard, {backgroundColor: theme.surface, borderColor: theme.border}]}>
             <View style={{flexDirection: 'row', alignItems: 'center'}}>
-              <Ionicons name={isDarkMode ? "moon" : "sunny"} size={22} color={isDarkMode ? "#a855f7" : "#eab308"} />
-              <Text style={{color: theme.text, fontWeight: 'bold', fontSize: 16, marginLeft: 10}}>Dark Mode</Text>
+              <Ionicons name={isDarkMode ? "moon" : "sunny"} size={28} color={isDarkMode ? theme.accent : theme.warning} />
+              <Text style={{color: theme.text, fontWeight: '800', fontSize: 18, marginLeft: 15}}>Dark Appearance</Text>
             </View>
-            <Switch value={isDarkMode} onValueChange={toggleTheme} trackColor={{ false: "#767577", true: "#0ea5e9" }} thumbColor={"#fff"} />
+            <Switch value={isDarkMode} onValueChange={() => { Haptics.selectionAsync(); setIsDarkMode(!isDarkMode); AsyncStorage.setItem('@dark_mode', JSON.stringify(!isDarkMode));}} trackColor={{ false: theme.border, true: theme.primary }} thumbColor={"#fff"} />
           </View>
           
-          <View style={[styles.statsRow, {backgroundColor: theme.card, borderColor: theme.border}]}>
+          <View style={[styles.statsRow, {backgroundColor: theme.surface, borderColor: theme.border}]}>
             <View style={styles.statBox}>
               <Text style={[styles.statNumber, {color: theme.text}]}>{savedNotices.length}</Text>
-              <Text style={[styles.statLabel, {color: theme.subText}]}>Saved Posts</Text>
+              <Text style={[styles.statLabel, {color: theme.subText}]}>Bookmarks</Text>
             </View>
-            <View style={styles.statBox}>
-              <Text style={[styles.statNumber, {color: theme.text}]}>{notices.filter(n => n.author === userName).length}</Text>
-              <Text style={[styles.statLabel, {color: theme.subText}]}>Your Posts</Text>
+            <View style={[styles.statBox, {borderLeftWidth: 1, borderRightWidth: isAdmin ? 1 : 0, borderColor: theme.border}]}>
+              <Text style={[styles.statNumber, {color: theme.text}]}>{notices.filter(n => n.likedBy.includes(userName)).length}</Text>
+              <Text style={[styles.statLabel, {color: theme.subText}]}>Interactions</Text>
             </View>
+            {isAdmin && (
+              <View style={styles.statBox}>
+                <Text style={[styles.statNumber, {color: theme.accent}]}>{notices.filter(n => n.author === userName).length}</Text>
+                <Text style={[styles.statLabel, {color: theme.accent}]}>Broadcasts</Text>
+              </View>
+            )}
           </View>
-        </View>
+
+          <TouchableOpacity style={{marginTop: 50, flexDirection: 'row', alignItems: 'center', backgroundColor: theme.surface, paddingVertical: 18, paddingHorizontal: 35, borderRadius: 30, borderWidth: 1, borderColor: theme.border}} onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); AsyncStorage.clear(); setUserName(''); setShowAuthModal(true); setPassword(''); setTempName(''); }}>
+            <Ionicons name="log-out-outline" size={24} color={theme.danger} />
+            <Text style={{color: theme.danger, fontSize: 17, fontWeight: '800', marginLeft: 12}}>Sign Out Session</Text>
+          </TouchableOpacity>
+        </ScrollView>
       )}
 
-      <View style={[styles.bottomNav, {backgroundColor: theme.nav, borderColor: theme.border}]}>
-        <TouchableOpacity style={styles.navTab} onPress={() => setActiveTab('feed')}>
-          <Ionicons name="home" size={24} color={activeTab === 'feed' ? '#0ea5e9' : theme.subText} />
-          <Text style={[styles.navText, {color: theme.subText}, activeTab === 'feed' && {color: '#0ea5e9'}]}>Home</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.navTab} onPress={() => setActiveTab('publish')}>
-          <Ionicons name="add-circle" size={28} color={activeTab === 'publish' ? '#0ea5e9' : theme.subText} />
-          <Text style={[styles.navText, {color: theme.subText}, activeTab === 'publish' && {color: '#0ea5e9'}]}>Publish</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.navTab} onPress={() => setActiveTab('profile')}>
-          <Ionicons name="person" size={24} color={activeTab === 'profile' ? '#0ea5e9' : theme.subText} />
-          <Text style={[styles.navText, {color: theme.subText}, activeTab === 'profile' && {color: '#0ea5e9'}]}>Profile</Text>
-        </TouchableOpacity>
+      {/* NEW: BILLION DOLLAR FLOATING PILL NAV */}
+      <View style={[styles.floatingNavContainer, { shadowColor: isDarkMode ? '#000' : '#888' }]}>
+        <BlurView intensity={isDarkMode ? 50 : 80} tint={isDarkMode ? "dark" : "light"} style={[styles.floatingNav, {backgroundColor: isDarkMode ? 'rgba(20,20,20,0.85)' : 'rgba(255,255,255,0.85)', borderColor: theme.border}]}>
+          <TouchableOpacity style={styles.navTab} onPress={() => switchTab('feed')}>
+            <Animated.View style={{ transform: [{ scale: navAnimFeed }] }}>
+              {notices.length > 0 && activeTab !== 'feed' && (
+                <View style={{position: 'absolute', top: -2, right: -2, width: 14, height: 14, borderRadius: 7, backgroundColor: theme.danger, borderWidth: 2, borderColor: theme.surface, zIndex: 10}} />
+              )}
+              <Ionicons name={activeTab === 'feed' ? "home" : "home-outline"} size={28} color={activeTab === 'feed' ? theme.primary : theme.subText} />
+            </Animated.View>
+          </TouchableOpacity>
+          
+          {isAdmin && (
+            <TouchableOpacity style={styles.navTab} onPress={() => switchTab('publish')}>
+              <View style={[styles.publishNavBtn, {backgroundColor: theme.accent}]}>
+                <Ionicons name="add" size={32} color="#fff" />
+              </View>
+            </TouchableOpacity>
+          )}
+
+          <TouchableOpacity style={styles.navTab} onPress={() => switchTab('profile')}>
+            <Animated.View style={{ transform: [{ scale: navAnimProfile }] }}>
+              <Ionicons name={activeTab === 'profile' ? "person" : "person-outline"} size={28} color={activeTab === 'profile' ? theme.primary : theme.subText} />
+            </Animated.View>
+          </TouchableOpacity>
+        </BlurView>
       </View>
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, paddingTop: 50 },
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingBottom: 15, borderBottomWidth: 1 },
-  headerTitle: { fontSize: 24, fontWeight: '900' },
-  headerAvatar: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#0ea5e9', justifyContent: 'center', alignItems: 'center' },
-  adminDot: { position: 'absolute', right: -2, bottom: -2, width: 14, height: 14, borderRadius: 7, backgroundColor: '#10b981', borderWidth: 2, borderColor: '#000' },
+  container: { flex: 1 },
+  authContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 30 },
+  iconBlur: { padding: 30, borderRadius: 40, marginBottom: 30 },
+  authTitle: { fontSize: 44, fontWeight: '900', letterSpacing: -1.5 },
+  authSub: { fontSize: 18, marginTop: 10, fontWeight: '600' },
+  authRoleBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 24, borderRadius: 28, borderWidth: 1, width: '100%' },
+  authRoleText: { fontSize: 20, fontWeight: '800', flex: 1, marginLeft: 15 },
+  authInput: { padding: 24, borderRadius: 28, fontSize: 18, borderWidth: 1, width: '100%', fontWeight: '700' },
+  passwordContainer: { flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderRadius: 28, width: '100%', marginBottom: 35 },
+  passwordInput: { flex: 1, padding: 24, fontSize: 18, fontWeight: '700' },
+  authSubmitBtn: { padding: 24, borderRadius: 28, alignItems: 'center', width: '100%', elevation: 4 },
+  authSubmitText: { color: '#fff', fontSize: 20, fontWeight: '900', letterSpacing: 1 },
+  
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end', paddingTop: Platform.OS === 'ios' ? 60 : 40, paddingHorizontal: 25, paddingBottom: 25 },
+  staticHeader: { paddingTop: Platform.OS === 'ios' ? 80 : 60, paddingHorizontal: 25, paddingBottom: 25, borderBottomWidth: 1, borderColor: '#333' },
+  headerTitle: { fontSize: 40, fontWeight: '900', letterSpacing: -1.5, marginTop: 4 },
+  headerAvatar: { width: 56, height: 56, borderRadius: 28, justifyContent: 'center', alignItems: 'center', position: 'absolute', right: 25, bottom: 25, elevation: 5 },
+  adminDot: { position: 'absolute', right: 0, bottom: 0, width: 18, height: 18, borderRadius: 9, backgroundColor: '#10B981', borderWidth: 3, borderColor: '#000' },
+  
   screenContainer: { flex: 1 },
-  sectionTitle: { fontSize: 22, fontWeight: 'bold', marginBottom: 20 },
-  subLabel: { marginBottom: 10, marginTop: 15, fontWeight: '600' },
-  
-  toast: { position: 'absolute', top: Platform.OS === 'ios' ? 40 : 10, left: 20, right: 20, padding: 15, borderRadius: 12, flexDirection: 'row', alignItems: 'center', zIndex: 1000, shadowColor: '#000', shadowOffset: {width:0, height:4}, shadowOpacity: 0.3, shadowRadius: 5 },
-  toastText: { color: '#fff', fontWeight: 'bold', fontSize: 16, marginLeft: 10 },
+  toast: { position: 'absolute', top: Platform.OS === 'ios' ? 60 : 40, left: 20, right: 20, padding: 22, borderRadius: 28, flexDirection: 'row', alignItems: 'center', zIndex: 1000, elevation: 10 },
+  toastText: { color: '#fff', fontWeight: '800', fontSize: 17, marginLeft: 15 },
 
-  searchContainer: { flexDirection: 'row', alignItems: 'center', marginTop: 15, marginHorizontal: 15, paddingHorizontal: 15, borderRadius: 12, borderWidth: 1 },
-  searchInput: { flex: 1, paddingVertical: 12, fontSize: 16 },
+  searchContainer: { flexDirection: 'row', alignItems: 'center', marginTop: 10, marginBottom: 15, paddingHorizontal: 20, borderRadius: 28, borderWidth: 1 },
+  searchInput: { flex: 1, paddingVertical: 20, fontSize: 17, fontWeight: '600' },
+  chipScroll: { maxHeight: 55, marginBottom: 25 },
+  filterChip: { paddingHorizontal: 28, justifyContent: 'center', borderRadius: 28, marginRight: 12, borderWidth: 1, height: 50 },
+  filterChipText: { fontWeight: '800', fontSize: 15 },
 
-  chipScroll: { paddingHorizontal: 15, paddingVertical: 12, maxHeight: 60 },
-  filterChip: { paddingHorizontal: 20, paddingVertical: 8, borderRadius: 20, marginRight: 10, borderWidth: 1, height: 35 },
-  filterChipText: { fontWeight: 'bold', fontSize: 13 },
-  
-  sortRow: { flexDirection: 'row', paddingHorizontal: 15, paddingBottom: 10, alignItems: 'center' },
-
-  input: { padding: 16, borderRadius: 12, marginBottom: 15, fontSize: 16, borderWidth: 1 },
-  progressContainer: { height: 4, width: '100%', backgroundColor: '#333', borderRadius: 2, overflow: 'hidden' },
-  progressBar: { height: '100%' },
-  charCount: { alignSelf: 'flex-end', fontSize: 12, marginTop: 4, fontWeight: 'bold' },
-
-  categoryRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 30 },
-  catBtn: { paddingVertical: 12, paddingHorizontal: 15, borderRadius: 12, borderWidth: 1, flex: 1, marginHorizontal: 4, alignItems: 'center' },
-  
-  publishBtn: { backgroundColor: '#0ea5e9', padding: 18, borderRadius: 12, flexDirection: 'row', justifyContent: 'center', alignItems: 'center' },
-  publishBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
-
-  card: { padding: 18, borderRadius: 16, marginBottom: 15 },
-  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 },
+  // NEW: Ultra-soft shadow cards
+  card: { padding: 26, borderRadius: 35, marginBottom: 25, elevation: 2 },
+  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20 },
   authorRow: { flexDirection: 'row', alignItems: 'center' },
-  avatar: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center', marginRight: 10 },
-  cardAuthor: { fontSize: 15, fontWeight: '700' },
-  timeText: { color: '#888', fontSize: 12, marginTop: 2 },
-  badge: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 20 },
-  badgeText: { color: '#fff', fontSize: 10, fontWeight: '900', textTransform: 'uppercase' },
-  cardTitle: { fontSize: 19, fontWeight: 'bold', marginBottom: 8 },
-  cardDesc: { fontSize: 15, lineHeight: 24, marginBottom: 12 },
-  
-  trendingBadge: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#451a03', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12, alignSelf: 'flex-start', marginBottom: 12, borderWidth: 1, borderColor: '#f59e0b' },
-  trendingText: { color: '#f59e0b', fontSize: 12, fontWeight: 'bold', marginLeft: 4 },
-
-  cardFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderTopWidth: 1, paddingTop: 12 },
+  avatar: { width: 50, height: 50, borderRadius: 25, justifyContent: 'center', alignItems: 'center', marginRight: 15 },
+  cardAuthor: { fontSize: 19, fontWeight: '900', letterSpacing: -0.3 },
+  badge: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 18 },
+  badgeText: { fontSize: 12, fontWeight: '900', textTransform: 'uppercase', letterSpacing: 0.8 },
+  cardTitle: { fontSize: 26, fontWeight: '900', marginBottom: 14, letterSpacing: -0.5, lineHeight: 32 },
+  cardDesc: { fontSize: 18, lineHeight: 30, marginBottom: 25 },
+  cardFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderTopWidth: 1, paddingTop: 20 },
   actionRow: { flexDirection: 'row', alignItems: 'center' },
-  actionBtn: { flexDirection: 'row', alignItems: 'center', paddingVertical: 6, paddingRight: 15 },
-  actionText: { marginLeft: 6, fontWeight: 'bold', fontSize: 15 },
+  actionBtn: { flexDirection: 'row', alignItems: 'center', paddingVertical: 8, paddingRight: 25 },
+  actionText: { marginLeft: 8, fontWeight: '900', fontSize: 19 },
 
-  hiddenCardContainer: { flex: 1, flexDirection: 'row', justifyContent: 'space-between', marginBottom: 15, borderRadius: 16, overflow: 'hidden' },
-  hiddenBtn: { width: 80, justifyContent: 'center', alignItems: 'center', height: '100%' },
-  hiddenLeft: { backgroundColor: '#10b981', alignSelf: 'flex-start' },
-  hiddenRight: { backgroundColor: '#ef4444', alignSelf: 'flex-end' },
-  hiddenText: { color: '#fff', fontWeight: 'bold', marginTop: 4, fontSize: 13 },
+  hiddenCardContainer: { flex: 1, flexDirection: 'row', marginBottom: 25, borderRadius: 35, overflow: 'hidden', paddingHorizontal: 15 },
+  hiddenBtn: { width: 90, justifyContent: 'center', alignItems: 'center', borderRadius: 35 },
 
-  emptyState: { alignItems: 'center', justifyContent: 'center', marginTop: 80 },
-
-  bigAvatar: { width: 100, height: 100, borderRadius: 50, backgroundColor: '#0ea5e9', justifyContent: 'center', alignItems: 'center', marginBottom: 15, marginTop: 20 },
-  bigAvatarText: { color: '#fff', fontSize: 40, fontWeight: 'bold' },
-  profileName: { fontSize: 28, fontWeight: 'bold' },
-  editProfileBtn: { flexDirection: 'row', paddingHorizontal: 15, paddingVertical: 8, borderRadius: 20, borderWidth: 1, marginBottom: 20, alignItems: 'center' },
-  themeToggleCard: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', width: '100%', padding: 20, borderRadius: 16, borderWidth: 1, marginBottom: 20 },
-  statsRow: { flexDirection: 'row', justifyContent: 'space-around', width: '100%', padding: 20, borderRadius: 16, borderWidth: 1 },
-  statBox: { alignItems: 'center' },
-  statNumber: { fontSize: 28, fontWeight: '900', marginBottom: 5 },
-  statLabel: { fontSize: 12, fontWeight: '600', textTransform: 'uppercase' },
-
-  bottomNav: { flexDirection: 'row', borderTopWidth: 1, paddingBottom: Platform.OS === 'ios' ? 25 : 15, paddingTop: 12 },
-  navTab: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  navText: { fontSize: 12, marginTop: 4, fontWeight: '700' },
-
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center', alignItems: 'center' },
-  modalBox: { width: '85%', padding: 30, borderRadius: 20, borderWidth: 1 },
-  modalTitle: { fontSize: 24, fontWeight: '900', marginBottom: 8, textAlign: 'center' },
-  modalSub: { marginBottom: 25, textAlign: 'center', fontSize: 14 },
+  emptyState: { alignItems: 'center', justifyContent: 'center', marginTop: 120 },
   
-  expandedBox: { width: '95%', height: '85%', padding: 25, borderRadius: 20, borderWidth: 1 },
-  closeBtn: { alignSelf: 'flex-end', marginBottom: 10 },
-  expandedTitle: { fontSize: 26, fontWeight: 'bold', marginBottom: 10 },
-  expandedDesc: { fontSize: 18, lineHeight: 28 },
+  subLabel: { fontSize: 18, fontWeight: '900', marginTop: 10, marginBottom: 15 },
+  input: { padding: 24, borderRadius: 28, marginBottom: 25, fontSize: 18, borderWidth: 1, fontWeight: '600' },
+  categoryRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 40 },
+  catBtn: { paddingVertical: 20, borderRadius: 24, borderWidth: 1, flex: 1, marginHorizontal: 6, alignItems: 'center' },
+  publishBtn: { padding: 24, borderRadius: 28, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', elevation: 5 },
+  publishBtnText: { color: '#fff', fontWeight: '900', fontSize: 20, letterSpacing: 0.5 },
+
+  bigAvatar: { width: 140, height: 140, borderRadius: 70, justifyContent: 'center', alignItems: 'center', elevation: 8 },
+  bigAvatarText: { color: '#fff', fontSize: 60, fontWeight: '900' },
+  profileName: { fontSize: 38, fontWeight: '900', letterSpacing: -1 },
+  themeToggleCard: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', width: '100%', padding: 28, borderRadius: 32, borderWidth: 1, marginBottom: 25 },
+  colorSwatch: { width: 48, height: 48, borderRadius: 24, marginRight: 15, justifyContent: 'center', alignItems: 'center' },
+  statsRow: { flexDirection: 'row', justifyContent: 'space-around', width: '100%', paddingVertical: 28, borderRadius: 32, borderWidth: 1 },
+  statBox: { flex: 1, alignItems: 'center' },
+  statNumber: { fontSize: 38, fontWeight: '900', marginBottom: 8 },
+  statLabel: { fontSize: 14, fontWeight: '900', textTransform: 'uppercase', letterSpacing: 1 },
+
+  // NEW: BILLION DOLLAR FLOATING NAV BAR
+  floatingNavContainer: { position: 'absolute', bottom: Platform.OS === 'ios' ? 40 : 25, left: 25, right: 25, elevation: 15 },
+  floatingNav: { flexDirection: 'row', borderRadius: 40, paddingVertical: 15, justifyContent: 'space-around', alignItems: 'center', borderWidth: 1, overflow: 'hidden' },
+  navTab: { alignItems: 'center', justifyContent: 'center', width: 80 },
+  publishNavBtn: { width: 60, height: 60, borderRadius: 30, justifyContent: 'center', alignItems: 'center', elevation: 4 },
+
+  expandedOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)' },
+  expandedTitle: { fontSize: 40, fontWeight: '900', marginBottom: 25, letterSpacing: -1.5, lineHeight: 46 },
+  expandedDesc: { fontSize: 22, lineHeight: 36, fontWeight: '500' },
 });
