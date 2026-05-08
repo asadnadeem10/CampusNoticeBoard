@@ -1,11 +1,12 @@
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { BlurView } from 'expo-blur';
-import { addDoc, arrayRemove, arrayUnion, collection, deleteDoc, doc, getDocs, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
 import { useEffect, useRef, useState } from 'react';
+import * as ReactNative from 'react-native';
 import {
   Alert,
   Animated,
+  FlatList,
+  Image,
   KeyboardAvoidingView,
   LayoutAnimation,
   Modal,
@@ -23,12 +24,14 @@ import {
   View
 } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { SwipeListView } from 'react-native-swipe-list-view';
-import { db } from './firebaseConfig';
 
-import * as Device from 'expo-device';
+import { decode } from 'base64-arraybuffer';
 import * as Haptics from 'expo-haptics';
+import * as ImagePicker from 'expo-image-picker';
 import * as Notifications from 'expo-notifications';
+
+// 🔥 SUPABASE IMPORT
+import { supabase } from './supabaseClient';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({ shouldShowAlert: true, shouldPlaySound: true, shouldSetBadge: false }),
@@ -37,15 +40,6 @@ Notifications.setNotificationHandler({
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
-
-const AVATAR_COLORS = [
-  '#000000', '#007AFF', '#5856D6', '#FF2D55', 
-  '#34C759', '#FF9500', '#FF3B30', '#32ADE6' 
-];
-
-const AVATAR_EMOJIS = [
-  'Aa', '🎓', '🚀', '💡', '🔥', '👑', '👻', '💻', '🎸', '🕹️', '🎨'
-];
 
 export default function App() {
   return (
@@ -58,39 +52,25 @@ export default function App() {
 function MainApp() {
   const insets = useSafeAreaInsets(); 
 
+  // --- CORE STATE ---
+  const [session, setSession] = useState(null);
+  const [currentUser, setCurrentUser] = useState(null);
+  
   const [activeTab, setActiveTab] = useState('feed'); 
   const [notices, setNotices] = useState([]);
   const [isLoading, setIsLoading] = useState(true); 
-  
-  const [searchQuery, setSearchQuery] = useState('');
-  const [activeFilter, setActiveFilter] = useState('All'); 
-  const [savedNotices, setSavedNotices] = useState([]); 
-  const [selectedNotice, setSelectedNotice] = useState(null); 
   const [refreshing, setRefreshing] = useState(false);
   const [isDarkMode, setIsDarkMode] = useState(true); 
   
+  const [searchQuery, setSearchQuery] = useState('');
+  const [activeFilter, setActiveFilter] = useState('All'); 
+  const [selectedNotice, setSelectedNotice] = useState(null); 
+  const [actionSheetNotice, setActionSheetNotice] = useState(null);
+  const [savedNotices, setSavedNotices] = useState([]);
+  
+  // --- UI STATE ---
   const [toast, setToast] = useState({ visible: false, message: '', type: 'success' });
   const [toastAnim] = useState(new Animated.Value(-100));
-  
-  const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
-  const [category, setCategory] = useState('General');
-  
-  const [isSilentPublish, setIsSilentPublish] = useState(false);
-  const [targetAudience, setTargetAudience] = useState('All Students');
-  
-  const [userName, setUserName] = useState('');
-  const [rollNo, setRollNo] = useState(''); 
-  const [tempName, setTempName] = useState('');
-  const [tempRollNo, setTempRollNo] = useState(''); 
-  const [password, setPassword] = useState(''); 
-  const [showAuthModal, setShowAuthModal] = useState(false);
-  const [authMode, setAuthMode] = useState(null); 
-  const [isAdmin, setIsAdmin] = useState(false);
-  
-  const [userColor, setUserColor] = useState(AVATAR_COLORS[1]);
-  const [userEmoji, setUserEmoji] = useState(''); 
-
   const scrollY = useRef(new Animated.Value(0)).current;
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const skeletonAnim = useRef(new Animated.Value(0.3)).current; 
@@ -98,117 +78,176 @@ function MainApp() {
   const navAnimProfile = useRef(new Animated.Value(1)).current;
   const listRef = useRef(null); 
 
+  // --- AUTH STATE ---
+  const [isLoginMode, setIsLoginMode] = useState(true);
+  const [authName, setAuthName] = useState('');
+  const [authEmail, setAuthEmail] = useState(''); 
+  const [authPassword, setAuthPassword] = useState('');
+  const [authAvatar, setAuthAvatar] = useState(null);
+  const [isAuthenticating, setIsAuthenticating] = useState(false);
+
+  // --- EDIT PROFILE STATE ---
+  const [isEditModalVisible, setIsEditModalVisible] = useState(false);
+  const [editName, setEditName] = useState('');
+  const [editAvatar, setEditAvatar] = useState(null);
+  const [isUpdatingProfile, setIsUpdatingProfile] = useState(false);
+
+  // --- PUBLISH & EDIT NOTICE STATE ---
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
+  const [category, setCategory] = useState('General');
+  const [targetAudience, setTargetAudience] = useState('All Students');
+  const [image, setImage] = useState(null);
+  const [eventDate, setEventDate] = useState('');
+  const [isUploading, setIsUploading] = useState(false);
+  const [editingNoticeId, setEditingNoticeId] = useState(null);
+
+  // --- HIG THEME ENGINE ---
   const theme = isDarkMode ? {
-    bg: '#000000', surface: '#1C1C1E', card: '#1C1C1E', text: '#FFFFFF', subText: '#EBEBF599', 
-    border: '#38383A', primary: userColor, accent: '#5856D6', danger: '#FF3B30', warning: '#FF9500'
+    bg: '#000000', surface: '#1C1C1E', card: '#1C1C1E', text: '#FFFFFF', subText: '#8E8E93', 
+    border: '#38383A', primary: '#0A84FF', accent: '#5E5CE6', danger: '#FF453A', warning: '#FF9F0A',
+    segmentedBg: '#1C1C1E', segmentedThumb: '#2C2C2E'
   } : {
-    bg: '#F2F2F7', surface: '#FFFFFF', card: '#FFFFFF', text: '#000000', subText: '#3C3C4399', 
-    border: '#E5E5EA', primary: userColor, accent: '#5856D6', danger: '#FF3B30', warning: '#FF9500'
+    bg: '#F2F2F7', surface: '#FFFFFF', card: '#FFFFFF', text: '#000000', subText: '#8E8E93', 
+    border: '#E5E5EA', primary: '#007AFF', accent: '#5856D6', danger: '#FF3B30', warning: '#FF9500',
+    segmentedBg: '#E5E5EA', segmentedThumb: '#FFFFFF'
   };
 
   useEffect(() => {
-    loadLocalData();
-    registerForPushNotificationsAsync();
-    
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      if (session) fetchUserProfile(session.user.id);
+    });
+
+    supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+      if (session) fetchUserProfile(session.user.id);
+      else setCurrentUser(null);
+    });
+
     Animated.loop(
       Animated.parallel([
         Animated.sequence([
-          Animated.timing(pulseAnim, { toValue: 0.2, duration: 1000, useNativeDriver: true }),
-          Animated.timing(pulseAnim, { toValue: 1, duration: 1000, useNativeDriver: true })
+          Animated.timing(pulseAnim, { toValue: 0.3, duration: 1200, useNativeDriver: true }),
+          Animated.timing(pulseAnim, { toValue: 1, duration: 1200, useNativeDriver: true })
         ]),
         Animated.sequence([
-          Animated.timing(skeletonAnim, { toValue: 0.7, duration: 800, useNativeDriver: true }),
-          Animated.timing(skeletonAnim, { toValue: 0.3, duration: 800, useNativeDriver: true })
+          Animated.timing(skeletonAnim, { toValue: 0.6, duration: 800, useNativeDriver: true }),
+          Animated.timing(skeletonAnim, { toValue: 0.2, duration: 800, useNativeDriver: true })
         ])
       ])
     ).start();
 
-    const q = query(collection(db, 'notices'), orderBy('createdAt', 'desc'));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const noticesData = snapshot.docs.map(doc => ({
-        id: doc.id, ...doc.data(), likedBy: doc.data().likedBy || [], isPinned: doc.data().isPinned || false
-      }));
-      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-      setNotices(noticesData);
-      setIsLoading(false); 
-    });
-    return () => unsubscribe();
+    fetchNotices();
+    const subscription = supabase.channel('public:notices')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'notices' }, payload => { fetchNotices(); })
+      .subscribe();
+
+    return () => { supabase.removeChannel(subscription); }
   }, []);
 
-  async function registerForPushNotificationsAsync() {
-    let token;
-    if (Platform.OS === 'android' || Platform.OS === 'ios') {
-      if (Device.isDevice) {
-        const { status: existingStatus } = await Notifications.getPermissionsAsync();
-        let finalStatus = existingStatus;
-        if (existingStatus !== 'granted') finalStatus = (await Notifications.requestPermissionsAsync()).status;
-        if (finalStatus !== 'granted') return;
-        token = (await Notifications.getExpoPushTokenAsync({ projectId: "your-expo-project-id-here" })).data;
-        if (token) await setDoc(doc(db, 'pushTokens', token), { token: token, createdAt: serverTimestamp() }, { merge: true });
-      }
-    }
-  }
+  const fetchUserProfile = async (userId) => {
+    const { data } = await supabase.from('profiles').select('*').eq('id', userId).single();
+    if (data) setCurrentUser(data);
+  };
 
-  const loadLocalData = async () => {
-    const storedName = await AsyncStorage.getItem('@user_name');
-    const storedRole = await AsyncStorage.getItem('@user_role');
-    const storedRollNo = await AsyncStorage.getItem('@user_roll_no');
-    const storedTheme = await AsyncStorage.getItem('@dark_mode');
-    const storedSaves = await AsyncStorage.getItem('@saved_notices');
-    const storedColor = await AsyncStorage.getItem('@user_color'); 
-    const storedEmoji = await AsyncStorage.getItem('@user_emoji'); 
+  const fetchNotices = async () => {
+    const { data } = await supabase.from('notices').select('*').order('created_at', { ascending: false });
+    if (data) {
+      const mappedData = data.map(doc => ({
+        id: doc.id, title: doc.title, description: doc.description, category: doc.category,
+        targetAudience: doc.target_audience, author: doc.author, authorAvatar: doc.author_avatar,
+        isPinned: doc.is_pinned, likedBy: doc.liked_by || [], rsvps: doc.rsvps || [],
+        imageUrl: doc.image_url, eventDate: doc.event_date, createdAt: new Date(doc.created_at)
+      }));
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+      setNotices(mappedData);
+    }
+    setIsLoading(false);
+  };
+
+  // --- AUTHENTICATION ---
+  const pickAuthAvatar = async () => {
+    let result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsEditing: true, aspect: [1, 1], quality: 0.5, base64: true
+    });
+    if (!result.canceled) setAuthAvatar(result.assets[0]);
+  };
+
+  const handleAuth = async () => {
+    if (!authEmail || !authPassword) return showToast('Email and Password required.', 'error');
+    if (authPassword.length < 6) return showToast('Password must be 6+ chars.', 'error');
     
-    if (storedName) {
-      setUserName(storedName);
-      setIsAdmin(storedRole === 'admin');
-      if (storedRollNo) setRollNo(storedRollNo);
-    } else {
-      setShowAuthModal(true);
-    }
-    if (storedTheme !== null) setIsDarkMode(JSON.parse(storedTheme));
-    if (storedSaves !== null) setSavedNotices(JSON.parse(storedSaves));
-    if (storedColor !== null) setUserColor(storedColor);
-    if (storedEmoji) setUserEmoji(storedEmoji);
-  };
-
-  const changeUserColor = async (color) => {
-    Haptics.selectionAsync();
-    setUserColor(color);
-    await AsyncStorage.setItem('@user_color', color);
-  };
-
-  const changeUserEmoji = async (emoji) => {
-    Haptics.selectionAsync();
-    const finalEmoji = emoji === 'Aa' ? '' : emoji; 
-    setUserEmoji(finalEmoji);
-    await AsyncStorage.setItem('@user_emoji', finalEmoji);
-  };
-
-  const displayAvatar = userEmoji || (userName ? userName.charAt(0) : 'A');
-
-  const handleFilterSelect = (filter) => {
-    Haptics.selectionAsync();
-    setActiveFilter(filter);
+    setIsAuthenticating(true);
     try {
-      if (listRef.current) {
-        if (typeof listRef.current.scrollToOffset === 'function') {
-          listRef.current.scrollToOffset({ offset: 0, animated: true });
-        } else if (listRef.current._listView && typeof listRef.current._listView.scrollToOffset === 'function') {
-          listRef.current._listView.scrollToOffset({ offset: 0, animated: true });
+      if (isLoginMode) {
+        const { error } = await supabase.auth.signInWithPassword({ email: authEmail.trim(), password: authPassword });
+        if (error) throw error;
+      } else {
+        if (!authName) throw new Error("Full Name is required.");
+        const { data: authData, error: authError } = await supabase.auth.signUp({ email: authEmail.trim(), password: authPassword });
+        if (authError) throw authError;
+
+        let avatarUrl = null;
+        if (authAvatar && authAvatar.base64) {
+          const filePath = `${authData.user.id}_avatar.jpg`;
+          const { error: uploadError } = await supabase.storage.from('avatars').upload(filePath, decode(authAvatar.base64), { contentType: 'image/jpeg', upsert: true });
+          if (!uploadError) {
+            const { data } = supabase.storage.from('avatars').getPublicUrl(filePath);
+            avatarUrl = data.publicUrl;
+          }
         }
+        await supabase.from('profiles').insert([{ id: authData.user.id, full_name: authName, roll_no: authEmail.split('@')[0].toUpperCase(), avatar_url: avatarUrl, role: 'student' }]);
       }
-    } catch (error) { console.log('Scroll to top bypassed'); }
+    } catch (error) { showToast(error.message, 'error'); }
+    setIsAuthenticating(false);
   };
 
-  const timeAgo = (timestamp) => {
-    if (!timestamp || !timestamp.toDate) return 'Just now';
-    const seconds = Math.floor((new Date() - timestamp.toDate()) / 1000);
-    if (seconds / 86400 > 1) return Math.floor(seconds / 86400) + 'd ago';
-    if (seconds / 3600 > 1) return Math.floor(seconds / 3600) + 'h ago';
-    if (seconds / 60 > 1) return Math.floor(seconds / 60) + 'm ago';
-    return 'Just now';
+  const handleLogout = async () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    await supabase.auth.signOut();
+    setCurrentUser(null);
+    setAuthEmail(''); setAuthPassword('');
   };
 
+  // --- EDIT PROFILE LOGIC ---
+  const openEditProfile = () => {
+    Haptics.selectionAsync();
+    setEditName(currentUser?.full_name || '');
+    setEditAvatar(null);
+    setIsEditModalVisible(true);
+  };
+
+  const pickEditAvatar = async () => {
+    let result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsEditing: true, aspect: [1, 1], quality: 0.5, base64: true
+    });
+    if (!result.canceled) setEditAvatar(result.assets[0]);
+  };
+
+  const saveProfileUpdates = async () => {
+    if (!editName.trim()) return showToast('Name cannot be empty.', 'error');
+    setIsUpdatingProfile(true);
+    try {
+      let finalAvatarUrl = currentUser.avatar_url;
+      if (editAvatar && editAvatar.base64) {
+        const filePath = `${currentUser.id}_avatar_${Date.now()}.jpg`;
+        await supabase.storage.from('avatars').upload(filePath, decode(editAvatar.base64), { contentType: 'image/jpeg', upsert: true });
+        const { data } = supabase.storage.from('avatars').getPublicUrl(filePath);
+        finalAvatarUrl = data.publicUrl;
+      }
+      await supabase.from('profiles').update({ full_name: editName, avatar_url: finalAvatarUrl }).eq('id', currentUser.id);
+      await supabase.from('notices').update({ author: editName, author_avatar: finalAvatarUrl }).eq('author', currentUser.full_name);
+      
+      setCurrentUser({ ...currentUser, full_name: editName, avatar_url: finalAvatarUrl });
+      setIsEditModalVisible(false);
+      showToast('Profile Updated');
+      fetchNotices(); 
+    } catch (error) { showToast(error.message, 'error'); } 
+    finally { setIsUpdatingProfile(false); }
+  };
+
+  // --- UTILS ---
   const getGreeting = () => {
     const hour = new Date().getHours();
     if (hour < 12) return 'Good morning';
@@ -216,206 +255,155 @@ function MainApp() {
     return 'Good evening';
   };
 
-  const calculateReadTime = (text) => {
-    if (!text) return '1 min read'; 
-    const words = text.trim().split(/\s+/).length;
-    const time = Math.ceil(words / 200); 
-    return `${time} min read`;
-  };
-
-  const handleLogin = async () => {
-    if (authMode === 'admin') {
-      const enteredID = tempName.trim().toUpperCase();
-      if (enteredID === '' || password.trim() === '') {
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-        return showToast('Please enter ID and PIN.', 'error');
-      }
-
-      let isValidAdmin = false;
-      // CO-ADMIN AUTHENTICATION LOGIC
-      if ((enteredID === 'ASAD' && password === '15072003') || 
-          (enteredID === 'MUTARF' && password === '17092005')) {
-        isValidAdmin = true;
-      }
-
-      if (isValidAdmin) {
-        await AsyncStorage.setItem('@user_role', 'admin');
-        await AsyncStorage.setItem('@user_name', enteredID);
-        setIsAdmin(true);
-        setUserName(enteredID);
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-        showToast(`Admin Protocol Verified: ${enteredID}`);
-      } else {
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-        return showToast('Invalid Admin Credentials', 'error');
-      }
-    } else {
-      const enteredName = tempName.trim();
-      const enteredRollNo = tempRollNo.trim().toUpperCase();
-
-      if (enteredName === '' || enteredRollNo === '') {
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-        return showToast('Name and Roll No. are required.', 'error');
-      }
-
-      await AsyncStorage.setItem('@user_role', 'student');
-      await AsyncStorage.setItem('@user_name', enteredName);
-      await AsyncStorage.setItem('@user_roll_no', enteredRollNo);
-      setIsAdmin(false);
-      setUserName(enteredName);
-      setRollNo(enteredRollNo);
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      showToast(`Welcome, ${enteredName}`);
-    }
-
-    setShowAuthModal(false);
-    setPassword(''); 
-    setTempRollNo('');
+  const timeAgo = (timestamp) => {
+    if (!timestamp) return 'Just now';
+    const date = timestamp instanceof Date ? timestamp : new Date(timestamp);
+    const seconds = Math.floor((new Date() - date) / 1000);
+    if (seconds / 86400 > 1) return Math.floor(seconds / 86400) + 'd ago';
+    if (seconds / 3600 > 1) return Math.floor(seconds / 3600) + 'h ago';
+    if (seconds / 60 > 1) return Math.floor(seconds / 60) + 'm ago';
+    return 'Just now';
   };
 
   const showToast = (message, type = 'success') => {
     setToast({ visible: true, message, type });
     Animated.spring(toastAnim, { toValue: insets.top > 0 ? insets.top + 10 : 40, friction: 5, tension: 40, useNativeDriver: true }).start();
-    setTimeout(() => {
-      Animated.timing(toastAnim, { toValue: -150, duration: 300, useNativeDriver: true }).start(() => setToast({ visible: false, message: '', type: 'success' }));
-    }, 3000);
-  };
-
-  const animateTab = (animRef) => {
-    animRef.setValue(0.8);
-    Animated.spring(animRef, { toValue: 1, friction: 4, tension: 50, useNativeDriver: true }).start();
+    setTimeout(() => { Animated.timing(toastAnim, { toValue: -150, duration: 300, useNativeDriver: true }).start(() => setToast({ visible: false, message: '', type: 'success' })); }, 3000);
   };
 
   const switchTab = (tab) => {
-    Haptics.selectionAsync();
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); 
+    if (tab === 'publish' && !editingNoticeId) resetPublishForm(); 
     setActiveTab(tab);
-    if (tab === 'feed') animateTab(navAnimFeed);
-    if (tab === 'profile') animateTab(navAnimProfile);
+    if (tab === 'feed') { navAnimFeed.setValue(0.8); Animated.spring(navAnimFeed, { toValue: 1, friction: 5, useNativeDriver: true }).start(); }
+    if (tab === 'profile' || tab === 'dashboard') { navAnimProfile.setValue(0.8); Animated.spring(navAnimProfile, { toValue: 1, friction: 5, useNativeDriver: true }).start(); }
   };
 
-  const toggleBookmark = async (id) => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); 
-    const newSaves = savedNotices.includes(id) ? savedNotices.filter(saveId => saveId !== id) : [...savedNotices, id];
-    setSavedNotices(newSaves);
-    await AsyncStorage.setItem('@saved_notices', JSON.stringify(newSaves));
-    showToast(savedNotices.includes(id) ? 'Removed from Bookmarks' : 'Saved to Bookmarks');
+  // --- PUBLISH & EDIT LOGIC ---
+  const resetPublishForm = () => {
+    setTitle(''); setDescription(''); setCategory('General'); setImage(null); setEventDate(''); setEditingNoticeId(null);
   };
 
-  const togglePin = async (item) => {
-    if (!isAdmin) return;
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-    await updateDoc(doc(db, 'notices', item.id), { isPinned: !item.isPinned });
-    showToast(item.isPinned ? 'Notice Unpinned' : 'Notice Pinned to Top!');
+  const pickImage = async () => {
+    let result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsEditing: false, quality: 0.6, base64: true });
+    if (!result.canceled) setImage(result.assets[0]);
   };
 
-  const sendPushNotification = async (noticeTitle, noticeCategory) => {
-    try {
-      const tokensSnapshot = await getDocs(collection(db, 'pushTokens'));
-      const messages = [];
-      tokensSnapshot.forEach((doc) => {
-        messages.push({ to: doc.data().token, sound: 'default', title: `📢 GCUF ${noticeCategory} Update`, body: noticeTitle });
-      });
-      await fetch('https://exp.host/--/api/v2/push/send', {
-        method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify(messages),
-      });
-    } catch (error) { console.log("Notification error:", error); }
+  const loadNoticeIntoEditor = (item) => {
+    setTitle(item.title);
+    setDescription(item.description);
+    setCategory(item.category);
+    setEventDate(item.eventDate || '');
+    setImage(item.imageUrl ? { uri: item.imageUrl, isRemote: true } : null);
+    setEditingNoticeId(item.id);
+    switchTab('publish');
   };
 
   const publishNotice = async () => {
-    if (!isAdmin) return;
-    if (title.trim() === '' || description.trim() === '') {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-      return showToast('Fill all fields.', 'error');
-    }
+    if (!title || !description) return showToast('Fill all fields.', 'error');
+    setIsUploading(true);
+    let finalImageUrl = image?.isRemote ? image.uri : null;
+
     try {
-      await addDoc(collection(db, 'notices'), { 
-        title, description, category, targetAudience, 
-        author: userName, likedBy: [], isPinned: false, createdAt: serverTimestamp() 
-      });
-      
-      if (!isSilentPublish) {
-        sendPushNotification(title, category);
+      if (image && image.base64) {
+        const filePath = `${Date.now()}_poster.jpg`;
+        await supabase.storage.from('notice_images').upload(filePath, decode(image.base64), { contentType: 'image/jpeg', upsert: true });
+        const { data } = supabase.storage.from('notice_images').getPublicUrl(filePath);
+        finalImageUrl = data.publicUrl;
+      }
+
+      if (editingNoticeId) {
+        await supabase.from('notices').update({
+          title, description, category, target_audience: targetAudience,
+          image_url: finalImageUrl, event_date: category === 'Event' ? eventDate : null
+        }).eq('id', editingNoticeId);
+        showToast('Notice Updated Successfully!');
+      } else {
+        await supabase.from('notices').insert([{
+          title, description, category, target_audience: targetAudience,
+          author: currentUser.full_name, author_avatar: currentUser.avatar_url,
+          is_pinned: false, liked_by: [], rsvps: [], image_url: finalImageUrl, event_date: category === 'Event' ? eventDate : null
+        }]);
+        showToast('Broadcast Dispatched');
       }
       
-      setTitle(''); setDescription(''); setIsSilentPublish(false); setTargetAudience('All Students'); setActiveTab('feed'); setActiveFilter('All');
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      showToast(isSilentPublish ? 'Notice added silently.' : 'Notice published to all devices!');
-    } catch (error) { 
-      console.error("PUBLISH CRASH REASON: ", error);
-      showToast(`Failed: ${error.message}`, 'error'); 
-    }
+      resetPublishForm();
+      setIsUploading(false); 
+      setActiveTab('feed');
+      fetchNotices();
+    } catch (error) { setIsUploading(false); showToast(`Failed: ${error.message}`, 'error'); }
   };
 
   const deleteNotice = async (id) => {
-    if (!isAdmin) return;
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    await deleteDoc(doc(db, 'notices', id));
-    showToast('Notice permanently deleted.', 'error');
+    await supabase.from('notices').delete().eq('id', id);
+    showToast('Notice Deleted Permanently', 'error');
+    fetchNotices();
   };
 
-  const purgeAllNotices = async () => {
-    Alert.alert(
-      "DANGER: Purge Database",
-      "This will permanently delete ALL broadcasts. This action cannot be undone. Proceed?",
-      [
-        { text: "Cancel", style: "cancel" },
-        { 
-          text: "NUKE FEED", 
-          style: "destructive",
-          onPress: async () => {
-            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-            setIsLoading(true);
-            try {
-              const querySnapshot = await getDocs(collection(db, 'notices'));
-              querySnapshot.forEach(async (document) => {
-                await deleteDoc(doc(db, 'notices', document.id));
-              });
-              showToast('Database wiped successfully.', 'error');
-            } catch (error) {
-              console.log(error);
-            }
-          }
-        }
-      ]
-    );
+  const handleMoreAction = (item) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    if (Platform.OS === 'ios') {
+      let options = ['Cancel', 'Share Notice'];
+      let destructiveButtonIndex = null;
+      if (isAdmin) { options.push('Delete Notice'); destructiveButtonIndex = 2; }
+      
+      ReactNative.ActionSheetIOS.showActionSheetWithOptions({ options, cancelButtonIndex: 0, destructiveButtonIndex }, (buttonIndex) => {
+        if (buttonIndex === 1) Share.share({ message: `${item.title}\n\n${item.description}` });
+        if (buttonIndex === 2 && isAdmin) deleteNotice(item.id);
+      });
+    } else {
+      if(isAdmin) {
+        Alert.alert("Manage Notice", "What would you like to do?", [
+          {text: "Cancel", style: "cancel"}, {text: "Share", onPress: () => Share.share({ message: item.title })},
+          {text: "Delete", style: "destructive", onPress: () => deleteNotice(item.id)}
+        ]);
+      } else {
+        Share.share({ message: `${item.title}\n\n${item.description}` });
+      }
+    }
+  };
+
+  const togglePin = async (item) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+    await supabase.from('notices').update({ is_pinned: !item.isPinned }).eq('id', item.id);
+  };
+
+  const toggleBookmark = (id) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    const newSaves = savedNotices.includes(id) ? savedNotices.filter(saveId => saveId !== id) : [...savedNotices, id];
+    setSavedNotices(newSaves);
   };
 
   const likeNotice = async (item) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); 
-    const noticeRef = doc(db, 'notices', item.id);
-    const hasLiked = item.likedBy.includes(userName);
-    await updateDoc(noticeRef, { likedBy: hasLiked ? arrayRemove(userName) : arrayUnion(userName) });
+    const hasLiked = item.likedBy.includes(currentUser?.full_name);
+    const newLikedBy = hasLiked ? item.likedBy.filter(n => n !== currentUser?.full_name) : [...item.likedBy, currentUser?.full_name];
+    await supabase.from('notices').update({ liked_by: newLikedBy }).eq('id', item.id);
   };
 
-  let lastTap = null;
-  const handleCardPress = (item) => {
-    const now = Date.now();
-    const DOUBLE_PRESS_DELAY = 300;
-    if (lastTap && (now - lastTap) < DOUBLE_PRESS_DELAY) {
-      likeNotice(item); 
-    } else {
-      lastTap = now;
-      setTimeout(() => {
-        if(Date.now() - lastTap >= DOUBLE_PRESS_DELAY) {
-          Haptics.selectionAsync(); 
-          setSelectedNotice(item); 
-        }
-      }, DOUBLE_PRESS_DELAY);
-    }
+  const rsvpToEvent = async (item) => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    const hasRsvpd = item.rsvps?.includes(currentUser?.full_name);
+    const newRsvps = hasRsvpd ? item.rsvps.filter(n => n !== currentUser?.full_name) : [...(item.rsvps || []), currentUser?.full_name];
+    await supabase.from('notices').update({ rsvps: newRsvps }).eq('id', item.id);
   };
 
-  const shareNotice = async (item) => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    const message = `🎓 *GCUF OFFICIAL NOTICE* 🎓\n━━━━━━━━━━━━━━━━━━━━━━\n📢 *${item.title}*\n📑 Category: ${item.category}\n\n${item.description}\n\n━━━━━━━━━━━━━━━━━━━━━━\n📱 *Shared via GCUF Connect App*`;
-    try { await Share.share({ message }); } catch (error) {}
-  };
-
+  // --- DATA PROCESSING ---
+  const isAdmin = currentUser?.role === 'admin';
+  const totalLikes = notices.reduce((sum, notice) => sum + (notice.likedBy?.length || 0), 0);
+  const totalRsvps = notices.reduce((sum, notice) => sum + (notice.rsvps?.length || 0), 0);
+  const urgentCount = notices.filter(n => n.category === 'Urgent').length;
+  const eventCount = notices.filter(n => n.category === 'Event').length;
+  
+  const FILTER_OPTIONS = ['All', 'Events', 'Urgent', 'Saved'];
+  
   let processedNotices = notices.filter(notice => {
-    const matchesSearch = notice.title.toLowerCase().includes(searchQuery.toLowerCase()) || notice.category.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesFilter = activeFilter === 'All' || notice.category === activeFilter;
-    const matchesBookmarks = activeFilter === 'Saved' ? savedNotices.includes(notice.id) : true;
-    return matchesSearch && matchesFilter && matchesBookmarks;
+    const matchesSearch = (notice.title || '').toLowerCase().includes(searchQuery.toLowerCase());
+    if (activeFilter === 'All') return matchesSearch;
+    if (activeFilter === 'Saved') return matchesSearch && savedNotices.includes(notice.id);
+    if (activeFilter === 'Events') return matchesSearch && notice.category === 'Event';
+    return matchesSearch && notice.category === activeFilter;
   });
 
   processedNotices.sort((a, b) => {
@@ -424,115 +412,85 @@ function MainApp() {
     return 0;
   });
 
-  const headerBaseHeight = Platform.OS === 'ios' ? 140 : 120;
-  const headerCompactHeight = Platform.OS === 'ios' ? 100 : 80;
-  const headerHeight = scrollY.interpolate({ 
-    inputRange: [0, 80], 
-    outputRange: [headerBaseHeight + insets.top, headerCompactHeight + insets.top], 
-    extrapolate: 'clamp' 
-  });
+  // --- UI INTERPOLATIONS ---
   const headerOpacity = scrollY.interpolate({ inputRange: [0, 40], outputRange: [1, 0], extrapolate: 'clamp' });
-  const compactTitleOpacity = scrollY.interpolate({ inputRange: [40, 80], outputRange: [0, 1], extrapolate: 'clamp' });
+  const compactTitleOpacity = scrollY.interpolate({ inputRange: [40, 60], outputRange: [0, 1], extrapolate: 'clamp' });
 
-  const renderSkeleton = () => (
-    <Animated.View style={[styles.rowPadding, { opacity: skeletonAnim }]}>
-      <View style={[styles.frontCardInner, { backgroundColor: theme.card, borderColor: theme.border, borderWidth: 1 }]}>
-        <View style={styles.cardHeader}>
-          <View style={{flexDirection: 'row', alignItems: 'center'}}>
-            <View style={[styles.avatar, {backgroundColor: theme.border}]} />
-            <View>
-              <View style={{width: 100, height: 16, backgroundColor: theme.border, borderRadius: 8, marginBottom: 8}} />
-              <View style={{width: 60, height: 12, backgroundColor: theme.border, borderRadius: 6}} />
-            </View>
-          </View>
-        </View>
-        <View style={{width: '85%', height: 24, backgroundColor: theme.border, borderRadius: 8, marginBottom: 16}} />
-        <View style={{width: '100%', height: 16, backgroundColor: theme.border, borderRadius: 8, marginBottom: 8}} />
-        <View style={{width: '90%', height: 16, backgroundColor: theme.border, borderRadius: 8}} />
-      </View>
-    </Animated.View>
-  );
-
-  const renderNotice = (data) => {
-    const item = data.item;
+  // --- RENDER NOTICE CARD ---
+  const renderNotice = ({ item }) => {
     let catColor = theme.primary; let catIcon = 'megaphone';
     if (item.category === 'Urgent') { catColor = theme.danger; catIcon = 'alert-circle'; }
     if (item.category === 'Event') { catColor = '#34C759'; catIcon = 'calendar'; }
     
-    const likeCount = item.likedBy ? item.likedBy.length : 0;
-    const hasLiked = item.likedBy && item.likedBy.includes(userName);
+    const hasLiked = item.likedBy && item.likedBy.includes(currentUser?.full_name);
+    const hasRsvpd = item.rsvps && item.rsvps.includes(currentUser?.full_name);
     const isSaved = savedNotices.includes(item.id);
-    
-    const isPostAdmin = item.author === 'ASAD' || item.author === 'MUTARF';
-    const isMyPost = item.author === userName;
-    
-    const cardAvatarText = isMyPost ? displayAvatar : (item.author ? item.author.charAt(0) : 'A');
-    
-    const timeString = timeAgo(item.createdAt);
-    const isNewPost = timeString === 'Just now' || timeString.includes('m ago');
 
     return (
-      // ULTIMATE ANTI-BLEED ARCHITECTURE
-      // paddingTop creates the gap physically on the outside wrapper.
       <View style={styles.rowPadding}>
         <View style={styles.frontShadowBox}>
           <View style={[styles.frontCardInner, { backgroundColor: theme.card, borderColor: item.isPinned ? theme.warning : theme.border, borderWidth: item.isPinned ? 1.5 : 0.5 }]}>
             
-            <View style={[styles.colorAccentStrip, {backgroundColor: catColor}]} />
-
-            <Pressable onPress={() => handleCardPress(item)} onLongPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy); toggleBookmark(item.id); }}>
-              <View style={styles.cardHeader}>
-                <View style={styles.authorRow}>
-                  <View style={[styles.avatar, {backgroundColor: isMyPost ? theme.primary : (isPostAdmin ? '#5856D6' : theme.border)}]}>
-                    <Text style={{color: '#fff', fontWeight: '800', fontSize: isMyPost && userEmoji ? 22 : 18}}>{cardAvatarText}</Text>
-                  </View>
-                  <View>
-                    <View style={{flexDirection: 'row', alignItems: 'center'}}>
-                      <Text style={[styles.cardAuthor, {color: theme.text}]}>{item.author}</Text>
-                      {isPostAdmin && <MaterialCommunityIcons name="check-decagram" size={16} color="#007AFF" style={{marginLeft: 4}} />}
-                    </View>
-                    <View style={{flexDirection: 'row', alignItems: 'center', marginTop: 4}}>
-                      {item.isPinned && <Ionicons name="pin" size={12} color={theme.warning} style={{marginRight: 4}} />}
-                      <Text style={{color: theme.subText, fontSize: 13, fontWeight: '500'}}>{timeString}</Text>
-                      
-                      {isNewPost && <Animated.View style={[styles.newDot, { opacity: pulseAnim }]} />}
-
-                      <Text style={{color: theme.subText, fontSize: 13, fontWeight: '500', marginHorizontal: 6}}>•</Text>
-                      <Text style={{color: theme.subText, fontSize: 13, fontWeight: '500'}}>{calculateReadTime(item.description)}</Text>
-                    </View>
-                  </View>
+            <View style={styles.cardHeader}>
+              <View style={styles.authorRow}>
+                <View style={[styles.avatar, {backgroundColor: theme.border}]}>
+                  {item.authorAvatar ? ( <Image source={{uri: item.authorAvatar}} style={{width: '100%', height: '100%'}} /> ) : (
+                    <Text style={{color: '#fff', fontWeight: '800', fontSize: 18}}>{item.author ? item.author.charAt(0) : 'A'}</Text>
+                  )}
                 </View>
-                <Animated.View style={[styles.badge, { backgroundColor: catColor + '15' }, item.category === 'Urgent' && { opacity: pulseAnim }]}>
-                  <Ionicons name={catIcon} size={14} color={catColor} style={{marginRight: 4}} />
-                  <Text style={[styles.badgeText, {color: catColor}]}>{item.category}</Text>
-                </Animated.View>
+                <View>
+                  <View style={{flexDirection: 'row', alignItems: 'center'}}>
+                    <Text style={[styles.cardAuthor, {color: theme.text}]}>{item.author}</Text>
+                    {isAdmin && <MaterialCommunityIcons name="check-decagram" size={16} color={theme.primary} style={{marginLeft: 4}} />}
+                  </View>
+                  <Text style={{color: theme.subText, fontSize: 13, fontWeight: '500', marginTop: 2}}>{timeAgo(item.createdAt)}</Text>
+                </View>
               </View>
+              <TouchableOpacity hitSlop={{top: 15, bottom: 15, left: 15, right: 15}} onPress={() => { Haptics.selectionAsync(); setActionSheetNotice(item); }}>
+                <Ionicons name="ellipsis-horizontal" size={20} color={theme.subText} />
+              </TouchableOpacity>
+            </View>
 
+            <Pressable onPress={() => setSelectedNotice(item)}>
               <Text style={[styles.cardTitle, {color: theme.text}]} numberOfLines={2}>{item.title}</Text>
-              <Text style={[styles.cardDesc, {color: theme.subText}]} numberOfLines={3}>{item.description}</Text>
+              
+              {item.imageUrl && (
+                <View style={styles.cardImageContainer}>
+                  <Image source={{uri: item.imageUrl}} style={styles.cardImage} resizeMode="contain" />
+                </View>
+              )}
+              
+              <Text style={[styles.cardDesc, {color: theme.text}]} numberOfLines={3}>{item.description}</Text>
             </Pressable>
+
+            {item.category === 'Event' && (
+              <View style={[styles.eventBlock, {backgroundColor: theme.segmentedBg}]}>
+                <View style={{flex: 1}}>
+                  <Text style={{color: theme.text, fontWeight: '700', fontSize: 15}}>{item.eventDate || 'Date TBD'}</Text>
+                  <Text style={{color: theme.subText, fontSize: 13, marginTop: 2}}>{item.rsvps?.length || 0} Going</Text>
+                </View>
+                <TouchableOpacity style={[styles.rsvpBtn, hasRsvpd && {backgroundColor: theme.primary, borderColor: theme.primary}]} onPress={() => rsvpToEvent(item)}>
+                  <Text style={[styles.rsvpBtnText, hasRsvpd && {color: '#fff'}]}>{hasRsvpd ? 'Going ✓' : 'Going'}</Text>
+                </TouchableOpacity>
+              </View>
+            )}
 
             <View style={[styles.cardFooter, {borderColor: theme.border}]}>
               <View style={styles.actionRow}>
-                <TouchableOpacity style={styles.actionBtn} onPress={() => likeNotice(item)}>
-                  <Ionicons name={hasLiked ? "heart" : "heart-outline"} size={26} color={hasLiked ? theme.danger : theme.subText} />
-                  <Text style={[styles.actionText, hasLiked ? {color: theme.danger} : {color: theme.subText}]}>{likeCount}</Text>
+                <TouchableOpacity hitSlop={{top: 10, bottom: 10, left: 10, right: 10}} style={styles.actionBtn} onPress={() => likeNotice(item)}>
+                  <Ionicons name={hasLiked ? "heart" : "heart-outline"} size={26} color={hasLiked ? theme.danger : theme.text} />
+                  <Text style={[styles.actionText, hasLiked ? {color: theme.danger} : {color: theme.text}]}>{item.likedBy?.length || 0}</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={styles.actionBtn} onPress={() => shareNotice(item)}>
-                  <Ionicons name="share-outline" size={24} color={theme.subText} />
-                </TouchableOpacity>
-              </View>
-              
-              <View style={styles.actionRow}>
-                {isAdmin && (
-                  <TouchableOpacity style={styles.actionBtn} onPress={() => togglePin(item)}>
-                    <Ionicons name={item.isPinned ? "pin" : "pin-outline"} size={26} color={item.isPinned ? theme.warning : theme.subText} />
-                  </TouchableOpacity>
-                )}
-                <TouchableOpacity style={styles.actionBtn} onPress={() => toggleBookmark(item.id)}>
-                  <Ionicons name={isSaved ? "bookmark" : "bookmark-outline"} size={26} color={isSaved ? theme.primary : theme.subText} />
+                <TouchableOpacity hitSlop={{top: 10, bottom: 10, left: 10, right: 10}} style={styles.actionBtn} onPress={() => toggleBookmark(item.id)}>
+                  <Ionicons name={isSaved ? "bookmark" : "bookmark-outline"} size={24} color={isSaved ? theme.primary : theme.text} />
                 </TouchableOpacity>
               </View>
+              {item.isPinned && (
+                <View style={{flexDirection: 'row', alignItems: 'center', backgroundColor: theme.warning+'15', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8}}>
+                  <Ionicons name="pin" size={12} color={theme.warning} />
+                  <Text style={{fontSize: 12, fontWeight: '700', color: theme.warning, marginLeft: 4}}>PINNED</Text>
+                </View>
+              )}
             </View>
           </View>
         </View>
@@ -540,150 +498,172 @@ function MainApp() {
     );
   };
 
-  const renderHiddenItem = (data) => {
-    return (
-      // The hidden layer ALSO takes the exact same padding. It is impossible to bleed into the gap.
-      <View style={[styles.rowPadding, { flex: 1 }]}>
-        <View style={styles.hiddenRowInner}>
-          <TouchableOpacity style={[styles.hiddenBtnLeft, {backgroundColor: '#007AFF'}]} onPress={() => { toggleBookmark(data.item.id); if(listRef.current) listRef.current.closeAllOpenRows(); }}>
-             <Ionicons name="bookmark" size={28} color="#fff" />
-          </TouchableOpacity>
-          
-          <View style={{flex: 1}} />
-
-          {isAdmin && (
-            <TouchableOpacity style={[styles.hiddenBtnRight, {backgroundColor: theme.danger}]} onPress={() => deleteNotice(data.item.id)}>
-              <Ionicons name="trash" size={32} color="#fff" />
-            </TouchableOpacity>
-          )}
-        </View>
+  const renderSkeleton = () => (
+    <Animated.View style={[styles.rowPadding, { opacity: skeletonAnim }]}>
+      <View style={[styles.frontCardInner, { backgroundColor: theme.card, borderColor: theme.border, borderWidth: 1 }]}>
+        <View style={styles.cardHeader}><View style={[styles.avatar, {backgroundColor: theme.border}]} /></View>
+        <View style={{width: '85%', height: 24, backgroundColor: theme.border, borderRadius: 8, marginBottom: 16}} />
+        <View style={{width: '100%', height: 16, backgroundColor: theme.border, borderRadius: 8, marginBottom: 8}} />
       </View>
-    );
-  };
+    </Animated.View>
+  );
 
+  // --- IF NOT LOGGED IN ---
+  if (!session) {
+    return (
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={[styles.authContainer, {backgroundColor: theme.bg}]}>
+        <StatusBar barStyle={isDarkMode ? "light-content" : "dark-content"} />
+        <Text style={[styles.authTitle, {color: theme.text}]}>NoticeBoard</Text>
+        <Text style={[styles.authSub, {color: theme.subText, marginBottom: 35}]}>{isLoginMode ? 'Sign in to access your campus.' : 'Create an account to join.'}</Text>
+
+        {!isLoginMode && (
+          <TouchableOpacity onPress={pickAuthAvatar} style={styles.avatarUploadBtn}>
+            {authAvatar ? ( <Image source={{uri: authAvatar.uri}} style={{width: 100, height: 100, borderRadius: 50}} /> ) : (
+              <View style={[styles.avatarPlaceholder, {backgroundColor: theme.surface, borderColor: theme.border}]}><Ionicons name="camera" size={32} color={theme.subText} /></View>
+            )}
+          </TouchableOpacity>
+        )}
+
+        <ScrollView keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled" contentContainerStyle={{paddingBottom: 20}}>
+          {!isLoginMode && <TextInput style={[styles.authInput, {backgroundColor: theme.surface, color: theme.text, borderColor: theme.border}]} placeholder="Full Name" placeholderTextColor={theme.subText} value={authName} onChangeText={setAuthName} clearButtonMode="while-editing" returnKeyType="next" />}
+          
+          <TextInput style={[styles.authInput, {backgroundColor: theme.surface, color: theme.text, borderColor: theme.border}]} placeholder="University Email" placeholderTextColor={theme.subText} value={authEmail} onChangeText={setAuthEmail} autoCapitalize="none" keyboardType="email-address" clearButtonMode="while-editing" returnKeyType="next" />
+          <TextInput style={[styles.authInput, {backgroundColor: theme.surface, color: theme.text, borderColor: theme.border, marginBottom: 30}]} placeholder="Password" placeholderTextColor={theme.subText} value={authPassword} onChangeText={setAuthPassword} secureTextEntry clearButtonMode="while-editing" returnKeyType="done" />
+
+          <TouchableOpacity style={[styles.authSubmitBtn, {backgroundColor: theme.primary, opacity: isAuthenticating ? 0.7 : 1}]} onPress={handleAuth} disabled={isAuthenticating}>
+            <Text style={styles.authSubmitText}>{isAuthenticating ? 'Processing...' : (isLoginMode ? 'Sign In' : 'Sign Up')}</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={{marginTop: 25, alignItems: 'center'}} onPress={() => { Haptics.selectionAsync(); setIsLoginMode(!isLoginMode); }}>
+            <Text style={{color: theme.primary, fontWeight: '600', fontSize: 16}}>{isLoginMode ? "Don't have an account? Sign Up" : "Already have an account? Sign In"}</Text>
+          </TouchableOpacity>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    );
+  }
+
+  // --- MAIN APP RENDER ---
   return (
     <View style={[styles.container, {backgroundColor: theme.bg}]}>
       <StatusBar barStyle={isDarkMode ? "light-content" : "dark-content"} />
       
       {toast.visible && (
         <Animated.View style={[styles.toast, { transform: [{ translateY: toastAnim }], backgroundColor: toast.type === 'error' ? theme.danger : theme.surface }]}>
-          <Ionicons name={toast.type === 'error' ? "warning" : "checkmark-circle"} size={20} color={toast.type === 'error' ? "#fff" : theme.primary} />
           <Text style={[styles.toastText, {color: toast.type === 'error' ? '#fff' : theme.text}]}>{toast.message}</Text>
         </Animated.View>
       )}
 
-      {/* AUTHENTICATION MODAL */}
-      <Modal visible={showAuthModal} animationType="slide" transparent={false} presentationStyle="pageSheet">
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={[styles.authContainer, {backgroundColor: theme.bg, paddingTop: insets.top, paddingBottom: insets.bottom}]}>
-          <View style={[styles.iconBlur, {backgroundColor: theme.primary + '15'}]}>
-             <Ionicons name="finger-print" size={80} color={theme.primary} />
+      {/* UNIVERSAL CUSTOM ACTION SHEET */}
+      <Modal visible={!!actionSheetNotice} animationType="fade" transparent={true}>
+        <TouchableOpacity style={styles.actionOverlay} activeOpacity={1} onPress={() => setActionSheetNotice(null)}>
+          <View style={[styles.actionSheetInner, {backgroundColor: theme.surface}]}>
+            <TouchableOpacity style={[styles.actionSheetBtn, {borderBottomColor: theme.border, borderBottomWidth: 0.5}]} onPress={() => { Share.share({ message: `${actionSheetNotice?.title}\n\n${actionSheetNotice?.description}` }); setActionSheetNotice(null); }}>
+              <Text style={[styles.actionSheetText, {color: theme.primary}]}>Share Notice</Text>
+            </TouchableOpacity>
+            
+            {isAdmin && (
+              <>
+                <TouchableOpacity style={[styles.actionSheetBtn, {borderBottomColor: theme.border, borderBottomWidth: 0.5}]} onPress={() => { loadNoticeIntoEditor(actionSheetNotice); setActionSheetNotice(null); }}>
+                  <Text style={[styles.actionSheetText, {color: theme.text}]}>Edit Notice</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[styles.actionSheetBtn]} onPress={() => { deleteNotice(actionSheetNotice.id); setActionSheetNotice(null); }}>
+                  <Text style={[styles.actionSheetText, {color: theme.danger}]}>Delete Notice</Text>
+                </TouchableOpacity>
+              </>
+            )}
           </View>
-          <Text style={[styles.authTitle, {color: theme.text}]}>GCUF Connect</Text>
-          <Text style={[styles.authSub, {color: theme.subText}]}>Secure Campus Network</Text>
+          <TouchableOpacity style={[styles.actionSheetInner, {backgroundColor: theme.surface, marginTop: 10}]} onPress={() => setActionSheetNotice(null)}>
+             <View style={styles.actionSheetBtn}><Text style={[styles.actionSheetText, {color: theme.primary, fontWeight: '700'}]}>Cancel</Text></View>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
 
-          {!authMode ? (
-            <View style={{width: '100%', marginTop: 50}}>
-              <TouchableOpacity style={[styles.authRoleBtn, {backgroundColor: theme.surface, borderColor: theme.border}]} onPress={() => { Haptics.selectionAsync(); setAuthMode('student'); }}>
-                <Ionicons name="school" size={26} color={theme.primary} />
-                <Text style={[styles.authRoleText, {color: theme.text}]}>Student Login</Text>
-                <Ionicons name="chevron-forward" size={20} color={theme.subText} />
-              </TouchableOpacity>
-              
-              <TouchableOpacity style={[styles.authRoleBtn, {backgroundColor: theme.surface, borderColor: theme.border, marginTop: 15}]} onPress={() => { Haptics.selectionAsync(); setAuthMode('admin'); }}>
-                <Ionicons name="shield-checkmark" size={26} color={theme.accent} />
-                <Text style={[styles.authRoleText, {color: theme.text}]}>Admin Login</Text>
-                <Ionicons name="chevron-forward" size={20} color={theme.subText} />
+      {/* EDIT PROFILE MODAL */}
+      <Modal visible={isEditModalVisible} animationType="slide" presentationStyle="pageSheet">
+        <View style={[styles.pageSheetContent, {backgroundColor: theme.bg, height: '100%', paddingTop: 20, paddingHorizontal: 25}]}>
+          <View style={{flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 30}}>
+            <Text style={{color: theme.text, fontSize: 32, fontWeight: '800', letterSpacing: -1}}>Edit Profile</Text>
+            <TouchableOpacity hitSlop={{top: 15, bottom: 15, left: 15, right: 15}} onPress={() => setIsEditModalVisible(false)}><View style={{backgroundColor: theme.surface, padding: 8, borderRadius: 20}}><Ionicons name="close" size={24} color={theme.subText} /></View></TouchableOpacity>
+          </View>
+          <ScrollView keyboardDismissMode="interactive">
+            <View style={{alignItems: 'center', marginBottom: 30}}>
+              <TouchableOpacity onPress={pickEditAvatar} style={{position: 'relative'}}>
+                <View style={[styles.bigAvatar, {backgroundColor: theme.surface, width: 120, height: 120, borderRadius: 60}]}>
+                  {editAvatar ? ( <Image source={{uri: editAvatar.uri}} style={{width: '100%', height: '100%'}} /> ) : currentUser?.avatar_url ? ( <Image source={{uri: currentUser.avatar_url}} style={{width: '100%', height: '100%'}} /> ) : ( <Ionicons name="person" size={50} color={theme.subText} /> )}
+                </View>
+                <View style={{position: 'absolute', bottom: 0, right: 0, backgroundColor: theme.primary, width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center', borderWidth: 3, borderColor: theme.bg}}><Ionicons name="camera" size={20} color="#fff" /></View>
               </TouchableOpacity>
             </View>
-          ) : (
-            <View style={{width: '100%', marginTop: 40}}>
-              
-              {authMode === 'admin' ? (
-                <>
-                  <TextInput style={[styles.authInput, {backgroundColor: theme.surface, color: theme.text, borderColor: theme.border, marginBottom: 15}]} placeholder="Administrator ID" placeholderTextColor={theme.subText} value={tempName} onChangeText={setTempName} autoCapitalize="characters" />
-                  <View style={[styles.passwordContainer, {backgroundColor: theme.surface, borderColor: theme.border}]}>
-                    <Ionicons name="lock-closed" size={20} color={theme.subText} style={{marginLeft: 20}} />
-                    <TextInput style={[styles.passwordInput, {color: theme.text}]} placeholder="Enter Security Pin" placeholderTextColor={theme.subText} value={password} onChangeText={setPassword} secureTextEntry={true} keyboardType="numeric" />
-                  </View>
-                </>
-              ) : (
-                <>
-                  <TextInput style={[styles.authInput, {backgroundColor: theme.surface, color: theme.text, borderColor: theme.border, marginBottom: 15}]} placeholder="Enter Full Name" placeholderTextColor={theme.subText} value={tempName} onChangeText={setTempName} autoCapitalize="words" />
-                  <TextInput style={[styles.authInput, {backgroundColor: theme.surface, color: theme.text, borderColor: theme.border, marginBottom: 20}]} placeholder="Enter Roll No. (e.g. BSCS-24)" placeholderTextColor={theme.subText} value={tempRollNo} onChangeText={setTempRollNo} autoCapitalize="characters" />
-                </>
-              )}
-
-              <TouchableOpacity style={[styles.authSubmitBtn, {backgroundColor: authMode === 'admin' ? theme.accent : theme.primary}]} onPress={handleLogin}>
-                <Text style={styles.authSubmitText}>Authenticate</Text>
-              </TouchableOpacity>
-              
-              <TouchableOpacity style={{marginTop: 30, alignItems: 'center', padding: 10}} onPress={() => { Haptics.selectionAsync(); setAuthMode(null); setTempName(''); setTempRollNo(''); setPassword(''); }}>
-                <Text style={{color: theme.subText, fontWeight: '600', fontSize: 16}}>Cancel & Go Back</Text>
-              </TouchableOpacity>
-            </View>
-          )}
-        </KeyboardAvoidingView>
+            <Text style={[styles.subLabel, {color: theme.text}]}>Full Name</Text>
+            <TextInput style={[styles.input, {backgroundColor: theme.surface, color: theme.text, borderColor: theme.border}]} value={editName} onChangeText={setEditName} clearButtonMode="while-editing" />
+            <TouchableOpacity style={[styles.publishBtn, {backgroundColor: theme.primary, marginTop: 20, opacity: isUpdatingProfile ? 0.6 : 1}]} onPress={saveProfileUpdates} disabled={isUpdatingProfile}>
+              <Text style={styles.publishBtnText}>{isUpdatingProfile ? 'Saving Changes...' : 'Save Profile'}</Text>
+            </TouchableOpacity>
+          </ScrollView>
+        </View>
       </Modal>
 
       {/* READING MODAL */}
-      <Modal visible={!!selectedNotice} animationType="fade" transparent={true}>
-        <BlurView intensity={isDarkMode ? 50 : 80} tint={isDarkMode ? "dark" : "light"} style={styles.pageSheetOverlay}>
-          <View style={[styles.pageSheetContent, {backgroundColor: theme.bg, paddingTop: insets.top > 0 ? 20 : 30, paddingBottom: insets.bottom + 40}]}>
-            <View style={styles.dragIndicator} />
-            
-            <View style={{flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 25, marginBottom: 20}}>
-               <View style={[styles.badge, { backgroundColor: theme.primary+'20', paddingHorizontal: 16, paddingVertical: 8 }]}>
-                <Text style={[styles.badgeText, {color: theme.primary, fontSize: 13}]}>{selectedNotice?.category}</Text>
-               </View>
-               <TouchableOpacity onPress={() => { Haptics.selectionAsync(); setSelectedNotice(null); }}>
-                 <View style={{backgroundColor: theme.border, padding: 8, borderRadius: 20}}>
-                   <Ionicons name="close" size={24} color={theme.text} />
-                 </View>
-               </TouchableOpacity>
-            </View>
-
-            <ScrollView contentContainerStyle={{paddingHorizontal: 25}}>
-              <Text style={[styles.expandedTitle, {color: theme.text}]}>{selectedNotice?.title}</Text>
-              <View style={{flexDirection: 'row', alignItems: 'center', marginBottom: 30, borderBottomWidth: 0.5, borderColor: theme.border, paddingBottom: 25}}>
-                <View style={[styles.avatar, {backgroundColor: theme.surface, width: 52, height: 52, borderRadius: 26, borderWidth: 0.5, borderColor: theme.border}]}><Text style={{color: theme.text, fontWeight: '700', fontSize: 18}}>{selectedNotice?.author.charAt(0)}</Text></View>
-                <View style={{marginLeft: 15}}>
-                  <View style={{flexDirection: 'row', alignItems: 'center'}}>
-                    <Text style={{color: theme.text, fontWeight: '700', fontSize: 17}}>{selectedNotice?.author}</Text>
-                    {(selectedNotice?.author === 'ASAD' || selectedNotice?.author === 'MUTARF') && <MaterialCommunityIcons name="check-decagram" size={16} color="#007AFF" style={{marginLeft: 4}} />}
-                  </View>
-                  <Text style={{color: theme.subText, marginTop: 4, fontWeight: '500', fontSize: 14}}>{timeAgo(selectedNotice?.createdAt)} • {calculateReadTime(selectedNotice?.description)}</Text>
-                </View>
-              </View>
-              <Text style={[styles.expandedDesc, {color: theme.text}]}>{selectedNotice?.description}</Text>
-            </ScrollView>
+      <Modal visible={!!selectedNotice} animationType="slide" presentationStyle="pageSheet">
+        <View style={[styles.pageSheetContent, {backgroundColor: theme.bg, height: '100%', paddingTop: 30, paddingHorizontal: 25}]}>
+          <View style={{flexDirection: 'row', justifyContent: 'flex-end', marginBottom: 20}}>
+             <TouchableOpacity hitSlop={{top: 15, bottom: 15, left: 15, right: 15}} onPress={() => setSelectedNotice(null)}><View style={{backgroundColor: theme.surface, padding: 8, borderRadius: 20}}><Ionicons name="close" size={24} color={theme.subText} /></View></TouchableOpacity>
           </View>
-        </BlurView>
+          <ScrollView showsVerticalScrollIndicator={false}>
+            <Text style={[styles.expandedTitle, {color: theme.text}]}>{selectedNotice?.title}</Text>
+            <View style={{flexDirection: 'row', alignItems: 'center', marginBottom: 25, borderBottomWidth: 0.5, borderColor: theme.border, paddingBottom: 25}}>
+              <View style={[styles.avatar, {backgroundColor: theme.surface, width: 48, height: 48, borderRadius: 24, overflow: 'hidden'}]}>
+                {selectedNotice?.authorAvatar ? (
+                  <Image source={{uri: selectedNotice.authorAvatar}} style={{width: '100%', height: '100%'}} />
+                ) : (
+                  <Text style={{color: theme.text, fontWeight: '700', fontSize: 18}}>{selectedNotice?.author?.charAt(0) || 'A'}</Text>
+                )}
+              </View>
+              <View style={{marginLeft: 15}}>
+                <Text style={{color: theme.text, fontWeight: '700', fontSize: 17}}>{selectedNotice?.author}</Text>
+                <Text style={{color: theme.subText, marginTop: 4, fontWeight: '500', fontSize: 14}}>{timeAgo(selectedNotice?.createdAt)}</Text>
+              </View>
+            </View>
+            
+            {selectedNotice?.imageUrl && (
+              <View style={styles.expandedImageContainer}>
+                <Image source={{uri: selectedNotice.imageUrl}} style={styles.expandedImage} resizeMode="contain" />
+              </View>
+            )}
+
+            <Text style={[styles.expandedDesc, {color: theme.text}]}>{selectedNotice?.description}</Text>
+            <View style={{height: 100}} />
+          </ScrollView>
+        </View>
       </Modal>
 
-      {/* HEADER */}
+      {/* LARGE DYNAMIC HEADER */}
       {activeTab === 'feed' ? (
-        <Animated.View style={[styles.header, { height: headerHeight, zIndex: 10, paddingTop: insets.top, overflow: 'hidden' }]}>
-          <BlurView intensity={isDarkMode ? 80 : 100} tint={isDarkMode ? "dark" : "light"} style={StyleSheet.absoluteFill} />
-          <Animated.View style={{ opacity: headerOpacity }}>
-            <Text style={{color: theme.subText, fontSize: 15, fontWeight: '700', letterSpacing: 0.3}}>{getGreeting()},</Text>
-            <Text style={[styles.headerTitle, {color: theme.text}]}>{userName ? userName.split(' ')[0] : 'Student'}</Text>
-          </Animated.View>
-          
-          <Animated.View style={{position: 'absolute', bottom: 15, left: 20, opacity: compactTitleOpacity}}>
-             <Text style={{color: theme.text, fontSize: 22, fontWeight: '800'}}>Campus Board</Text>
-          </Animated.View>
-
-          <TouchableOpacity onPress={() => switchTab(isAdmin ? 'dashboard' : 'profile')}>
-            <View style={[styles.headerAvatar, {backgroundColor: theme.primary}]}>
-              <Text style={{color: '#fff', fontWeight: '800', fontSize: userEmoji ? 26 : 18}}>{displayAvatar}</Text>
-              {isAdmin && <View style={styles.adminDot} />}
-            </View>
-          </TouchableOpacity>
-        </Animated.View>
+        <View style={{zIndex: 10}}>
+          <BlurView intensity={isDarkMode ? 80 : 100} tint={Platform.OS === 'ios' ? (isDarkMode ? "prominent" : "prominent") : (isDarkMode ? "dark" : "light")} style={[StyleSheet.absoluteFill, {borderBottomWidth: 0.5, borderColor: theme.border}]} />
+          <View style={{paddingTop: insets.top + 10, paddingHorizontal: 20, paddingBottom: 15, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end'}}>
+            <Animated.View style={{opacity: headerOpacity}}>
+              <Text style={{color: theme.subText, fontSize: 15, fontWeight: '600', textTransform: 'uppercase'}}>{getGreeting()}</Text>
+              <Text style={[styles.headerTitle, {color: theme.text}]}>Campus Feed</Text>
+            </Animated.View>
+            <Animated.View style={{position: 'absolute', bottom: 15, left: 20, opacity: compactTitleOpacity}}>
+               <Text style={{color: theme.text, fontSize: 18, fontWeight: '800'}}>Campus Feed</Text>
+            </Animated.View>
+            <TouchableOpacity onPress={() => switchTab('profile')}>
+              <View style={[styles.headerAvatar, {backgroundColor: theme.surface, justifyContent: 'center', alignItems: 'center'}]}>
+                {currentUser?.avatar_url ? (
+                  <Image source={{uri: currentUser.avatar_url}} style={{width: '100%', height: '100%'}} />
+                ) : (
+                  <Ionicons name="person" size={20} color={theme.subText} />
+                )}
+              </View>
+            </TouchableOpacity>
+          </View>
+        </View>
       ) : (
         <View style={[styles.staticHeader, {backgroundColor: theme.bg, paddingTop: insets.top + 20}]}>
-          <Text style={{color: theme.text, fontSize: 32, fontWeight: '800', letterSpacing: -1}}>
-            {activeTab === 'publish' ? 'New Broadcast' : activeTab === 'dashboard' ? 'Admin Console' : 'Your Profile'}
+          <Text style={{color: theme.text, fontSize: 34, fontWeight: '800', letterSpacing: -1}}>
+            {activeTab === 'publish' ? (editingNoticeId ? 'Edit Notice' : 'New Notice') : activeTab === 'dashboard' ? 'Command Center' : 'Profile'}
           </Text>
         </View>
       )}
@@ -691,283 +671,138 @@ function MainApp() {
       {/* FEED TAB */}
       {activeTab === 'feed' && (
         <View style={styles.screenContainer}>
-          {isLoading ? (
-            <View style={{paddingHorizontal: 20, paddingTop: 10}}>
-              {renderSkeleton()}{renderSkeleton()}
-            </View>
-          ) : (
-            <SwipeListView
-              ref={listRef} 
-              data={processedNotices}
-              keyExtractor={(item) => item.id}
+          {isLoading ? ( <View style={{padding: 20}}>{renderSkeleton()}{renderSkeleton()}</View> ) : (
+            <FlatList
+              ref={listRef} data={processedNotices} keyExtractor={(item) => item.id}
               renderItem={renderNotice}
-              renderHiddenItem={renderHiddenItem}
-              rightOpenValue={isAdmin ? -90 : 0} 
-              leftOpenValue={80} 
-              disableRightSwipe={false}
-              initialNumToRender={5}
-              maxToRenderPerBatch={5}
-              windowSize={5}
-              removeClippedSubviews={Platform.OS === 'android'}
-              contentContainerStyle={{paddingHorizontal: 20, paddingBottom: 140 + insets.bottom, paddingTop: 10}} 
-              
+              keyboardDismissMode="interactive"
+              contentContainerStyle={{paddingHorizontal: 15, paddingBottom: 140 + insets.bottom, paddingTop: 10}} 
               onScroll={Animated.event([{nativeEvent: {contentOffset: {y: scrollY}}}], {useNativeDriver: false})}
               scrollEventThrottle={16}
-              
-              refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); setRefreshing(true); setTimeout(() => setRefreshing(false), 1000);}} tintColor={theme.primary} />}
-              
+              refreshControl={<RefreshControl refreshing={refreshing} onRefresh={fetchNotices} tintColor={theme.subText} />}
               ListHeaderComponent={
-                <View>
-                  <View style={[styles.searchContainer, {backgroundColor: theme.surface, borderColor: theme.border}]}>
+                <View style={{marginBottom: 15, marginHorizontal: 5}}>
+                  <View style={[styles.searchContainer, {backgroundColor: theme.segmentedBg}]}>
                     <Ionicons name="search" size={20} color={theme.subText} style={{marginRight: 10}} />
-                    <TextInput style={[styles.searchInput, {color: theme.text}]} placeholder="Search updates..." placeholderTextColor={theme.subText} value={searchQuery} onChangeText={setSearchQuery} />
+                    <TextInput style={[styles.searchInput, {color: theme.text}]} placeholder="Search" placeholderTextColor={theme.subText} value={searchQuery} onChangeText={setSearchQuery} clearButtonMode="while-editing" returnKeyType="search" />
                   </View>
-                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll}>
-                    {['All', 'General', 'Urgent', 'Event', 'Saved'].map(filter => (
-                      <TouchableOpacity key={filter} style={[styles.filterChip, {backgroundColor: theme.surface, borderColor: theme.border}, activeFilter === filter && {backgroundColor: theme.text, borderColor: theme.text}]} onPress={() => handleFilterSelect(filter)}>
-                        <Text style={[styles.filterChipText, {color: theme.text}, activeFilter === filter && {color: theme.bg}]}>{filter}</Text>
-                      </TouchableOpacity>
-                    ))}
-                  </ScrollView>
+                  
+                  <View style={[styles.segmentedControl, {backgroundColor: theme.segmentedBg}]}>
+                    {FILTER_OPTIONS.map((filter) => {
+                      const isActive = activeFilter === filter;
+                      return (
+                        <TouchableOpacity key={filter} style={[styles.segmentBtn, isActive && {backgroundColor: theme.segmentedThumb, shadowOpacity: 0.1, shadowRadius: 4, elevation: 2}]} onPress={() => { Haptics.selectionAsync(); setActiveFilter(filter); }}>
+                          <Text style={[styles.segmentText, {color: isActive ? theme.text : theme.subText}]}>{filter}</Text>
+                        </TouchableOpacity>
+                      )
+                    })}
+                  </View>
                 </View>
               }
-
               ListEmptyComponent={
-                !isLoading && (
-                  <Animated.View style={styles.emptyState}>
-                    <Ionicons name="folder-open-outline" size={70} color={theme.border} />
-                    <Text style={{color: theme.subText, fontSize: 18, marginTop: 15, fontWeight: '600'}}>No broadcasts found.</Text>
-                  </Animated.View>
-                )
+                <View style={styles.emptyState}>
+                  <Ionicons name="documents-outline" size={60} color={theme.border} />
+                  <Text style={{color: theme.subText, fontSize: 17, marginTop: 15, fontWeight: '600'}}>No notices found.</Text>
+                </View>
               }
             />
           )}
         </View>
       )}
 
-      {/* PUBLISH TAB */}
+      {/* PUBLISH & EDIT TAB */}
       {activeTab === 'publish' && isAdmin && (
-        <ScrollView style={styles.screenContainer} contentContainerStyle={{padding: 20, paddingBottom: 140 + insets.bottom}}>
-          <Text style={{color: theme.subText, marginBottom: 30, fontSize: 15, lineHeight: 22, fontWeight: '500'}}>Notifications will be securely pushed to all campus devices on the GCUF network.</Text>
-          <TextInput style={[styles.input, {backgroundColor: theme.surface, color: theme.text, borderColor: theme.border}]} placeholder="Enter Headline..." placeholderTextColor={theme.subText} value={title} onChangeText={setTitle} />
-          <TextInput style={[styles.input, {height: 200, textAlignVertical: 'top', backgroundColor: theme.surface, color: theme.text, borderColor: theme.border}]} placeholder="Write complete details here..." placeholderTextColor={theme.subText} multiline value={description} onChangeText={setDescription} />
-          
-          <Text style={[styles.subLabel, {color: theme.text}]}>Target Audience</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{marginBottom: 25}}>
-            {['All Students', 'CS Department', 'Faculty Only'].map(audience => (
-              <TouchableOpacity key={audience} style={[styles.filterChip, {backgroundColor: theme.surface, borderColor: theme.border, height: 40}, targetAudience === audience && {backgroundColor: theme.primary, borderColor: theme.primary}]} onPress={() => {Haptics.selectionAsync(); setTargetAudience(audience);}}>
-                <Text style={[{color: theme.subText, fontWeight: '700'}, targetAudience === audience && {color: '#fff'}]}>{audience}</Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-
-          <Text style={[styles.subLabel, {color: theme.text}]}>Priority Level</Text>
-          <View style={styles.categoryRow}>
-            {['General', 'Event', 'Urgent'].map((cat) => {
-               const isActive = category === cat;
-               let activeColor = theme.primary;
-               if(cat === 'Urgent') activeColor = theme.danger;
-               if(cat === 'Event') activeColor = '#34C759';
-
-               return (
-                 <TouchableOpacity key={cat} style={[styles.catBtn, {backgroundColor: theme.surface, borderColor: theme.border}, isActive && {backgroundColor: activeColor+'15', borderColor: activeColor}]} onPress={() => { Haptics.selectionAsync(); setCategory(cat); }}>
-                   <Text style={[{color: theme.subText, fontWeight: '700'}, isActive && {color: activeColor}]}>{cat}</Text>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.screenContainer}>
+          <ScrollView keyboardDismissMode="interactive" contentContainerStyle={{padding: 20, paddingBottom: 140 + insets.bottom}}>
+            <TextInput style={[styles.input, {backgroundColor: theme.surface, color: theme.text}]} placeholder="Title" placeholderTextColor={theme.subText} value={title} onChangeText={setTitle} clearButtonMode="while-editing" />
+            <TextInput style={[styles.input, {height: 160, textAlignVertical: 'top', backgroundColor: theme.surface, color: theme.text}]} placeholder="Description" placeholderTextColor={theme.subText} multiline value={description} onChangeText={setDescription} />
+            
+            <Text style={[styles.subLabel, {color: theme.subText}]}>PRIORITY</Text>
+            <View style={styles.categoryRow}>
+              {['General', 'Event', 'Urgent'].map((cat) => (
+                 <TouchableOpacity key={cat} style={[styles.catBtn, {backgroundColor: theme.surface}, category === cat && {borderColor: theme.primary, borderWidth: 2}]} onPress={() => {Haptics.selectionAsync(); setCategory(cat)}}>
+                   <Text style={[{color: theme.text, fontWeight: '600'}, category === cat && {color: theme.primary, fontWeight: '800'}]}>{cat}</Text>
                  </TouchableOpacity>
-               )
-            })}
-          </View>
-          
-          <View style={[styles.themeToggleCard, {backgroundColor: theme.surface, borderColor: theme.border}]}>
-            <View style={{flex: 1}}>
-              <Text style={{color: theme.danger, fontWeight: '700', fontSize: 16}}>Stealth Publish</Text>
-              <Text style={{color: theme.subText, fontSize: 13, marginTop: 4}}>Post without pushing device notifications.</Text>
+              ))}
             </View>
-            <Switch value={isSilentPublish} onValueChange={() => { Haptics.selectionAsync(); setIsSilentPublish(!isSilentPublish);}} trackColor={{ false: theme.border, true: theme.danger }} thumbColor={"#fff"} />
-          </View>
 
-          <TouchableOpacity style={[styles.publishBtn, {backgroundColor: theme.accent}]} onPress={publishNotice}>
-            <Ionicons name={isSilentPublish ? "eye-off" : "paper-plane"} size={22} color="#fff" style={{marginRight: 10}} />
-            <Text style={styles.publishBtnText}>{isSilentPublish ? 'Publish Silently' : 'Dispatch Notice'}</Text>
-          </TouchableOpacity>
-        </ScrollView>
+            {category === 'Event' && <TextInput style={[styles.input, {backgroundColor: theme.surface, color: theme.text}]} placeholder="Event Date" placeholderTextColor={theme.subText} value={eventDate} onChangeText={setEventDate} clearButtonMode="while-editing" />}
+
+            <Text style={[styles.subLabel, {color: theme.subText}]}>MEDIA</Text>
+            <TouchableOpacity style={[styles.uploadBox, {backgroundColor: theme.surface}]} onPress={pickImage}>
+              {image ? <Image source={{ uri: image.uri }} style={styles.previewImage} resizeMode="contain" /> : <Ionicons name="image" size={32} color={theme.subText} />}
+            </TouchableOpacity>
+
+            <TouchableOpacity style={[styles.publishBtn, {backgroundColor: theme.primary, opacity: isUploading ? 0.6 : 1}]} onPress={publishNotice} disabled={isUploading}>
+              <Text style={styles.publishBtnText}>{isUploading ? 'Publishing...' : (editingNoticeId ? 'Update Notice' : 'Publish Notice')}</Text>
+            </TouchableOpacity>
+            
+            {editingNoticeId && (
+               <TouchableOpacity style={{marginTop: 20, alignItems: 'center'}} onPress={resetPublishForm}>
+                 <Text style={{color: theme.danger, fontWeight: '600', fontSize: 16}}>Cancel Editing</Text>
+               </TouchableOpacity>
+            )}
+          </ScrollView>
+        </KeyboardAvoidingView>
       )}
 
-      {/* DASHBOARD TAB (ADMIN ONLY) */}
+      {/* SUPERCHARGED DASHBOARD TAB */}
       {activeTab === 'dashboard' && isAdmin && (
         <ScrollView style={styles.screenContainer} contentContainerStyle={{padding: 20, paddingBottom: 140 + insets.bottom}}>
           
-          {/* ADMIN ID CARD & CUSTOMIZATION */}
-          <View style={[styles.idCard, {backgroundColor: theme.surface, borderColor: theme.border}]}>
-            <View style={[styles.bigAvatar, {backgroundColor: theme.primary}]}>
-              <Text style={[styles.bigAvatarText, userEmoji && {fontSize: 60}]}>{displayAvatar}</Text>
-            </View>
-            <View style={{alignItems: 'center', marginTop: 15}}>
-              <View style={{flexDirection: 'row', alignItems: 'center'}}>
-                <Text style={[styles.profileName, {color: theme.text}]}>{userName}</Text>
-                <MaterialCommunityIcons name="check-decagram" size={24} color="#007AFF" style={{marginLeft: 8}} />
-              </View>
-              <Text style={{color: '#5856D6', fontSize: 13, fontWeight: '700', marginTop: 6, letterSpacing: 1.5, textTransform: 'uppercase'}}>System Administrator</Text>
-            </View>
-          </View>
+          <Text style={[styles.subLabel, {color: theme.text, fontSize: 18, marginBottom: 15}]}><Ionicons name="analytics" size={18}/> Network Overview</Text>
 
-          <View style={[styles.themeToggleCard, {backgroundColor: theme.surface, borderColor: theme.border, flexDirection: 'column', alignItems: 'flex-start'}]}>
-            <Text style={{color: theme.text, fontWeight: '700', fontSize: 16, marginBottom: 15}}>Identity & Emoji</Text>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{paddingBottom: 15}}>
-              {AVATAR_EMOJIS.map((emoji) => {
-                const isActive = (emoji === 'Aa' && !userEmoji) || emoji === userEmoji;
-                return (
-                  <TouchableOpacity key={emoji} onPress={() => changeUserEmoji(emoji)} style={[styles.emojiSwatch, {backgroundColor: isActive ? theme.border : 'transparent'}]}>
-                    <Text style={{fontSize: 26, fontWeight: '800', color: theme.text}}>{emoji}</Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{paddingBottom: 5}}>
-              {AVATAR_COLORS.map((color) => (
-                <TouchableOpacity key={color} onPress={() => changeUserColor(color)} style={[styles.colorSwatch, {backgroundColor: color, borderColor: theme.border, borderWidth: userColor === color ? 3 : 1}]}>
-                  {userColor === color && <Ionicons name="checkmark" size={18} color={color === '#FFFFFF' ? '#000' : '#fff'} />}
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-          </View>
-
-          {/* ADMIN ANALYTICS */}
-          <View style={{flexDirection: 'row', alignItems: 'center', marginBottom: 25, marginTop: 10}}>
-             <MaterialCommunityIcons name="shield-account" size={32} color={theme.primary} />
-             <Text style={{color: theme.text, fontSize: 24, fontWeight: '800', marginLeft: 10}}>System Overview</Text>
-          </View>
-
-          <View style={styles.categoryRow}>
-            <View style={[styles.dashboardCard, {backgroundColor: theme.surface, borderColor: theme.border}]}>
-              <Ionicons name="documents" size={28} color={theme.accent} />
-              <Text style={[styles.dashboardNum, {color: theme.text}]}>{notices.length}</Text>
-              <Text style={styles.dashboardLabel}>Active Broadcasts</Text>
+          <View style={styles.gridContainer}>
+            <View style={styles.gridRow}>
+              <View style={[styles.dashboardCard, {backgroundColor: theme.surface}]}><Ionicons name="document-text" size={28} color={theme.primary} /><Text style={[styles.dashboardNum, {color: theme.text}]}>{notices.length}</Text><Text style={styles.dashboardLabel}>Total Posts</Text></View>
+              <View style={[styles.dashboardCard, {backgroundColor: theme.surface}]}><Ionicons name="people" size={28} color={theme.accent} /><Text style={[styles.dashboardNum, {color: theme.text}]}>{totalLikes}</Text><Text style={styles.dashboardLabel}>Total Likes</Text></View>
             </View>
-            <View style={[styles.dashboardCard, {backgroundColor: theme.surface, borderColor: theme.border}]}>
-              <Ionicons name="flash" size={28} color={theme.warning} />
-              <Text style={[styles.dashboardNum, {color: theme.text}]}>{notices.filter(n => n.category === 'Urgent').length}</Text>
-              <Text style={styles.dashboardLabel}>Urgent Alerts</Text>
+            <View style={styles.gridRow}>
+              <View style={[styles.dashboardCard, {backgroundColor: theme.surface}]}><Ionicons name="flame" size={28} color={theme.danger} /><Text style={[styles.dashboardNum, {color: theme.text}]}>{urgentCount}</Text><Text style={styles.dashboardLabel}>Urgent Alerts</Text></View>
+              <View style={[styles.dashboardCard, {backgroundColor: theme.surface}]}><Ionicons name="calendar" size={28} color={'#34C759'} /><Text style={[styles.dashboardNum, {color: theme.text}]}>{eventCount}</Text><Text style={styles.dashboardLabel}>Active Events</Text></View>
+            </View>
+            <View style={styles.gridRow}>
+              <View style={[styles.dashboardCard, {backgroundColor: theme.surface}]}><Ionicons name="checkmark-done-circle" size={28} color={theme.warning} /><Text style={[styles.dashboardNum, {color: theme.text}]}>{totalRsvps}</Text><Text style={styles.dashboardLabel}>Total Going</Text></View>
             </View>
           </View>
-
-          <View style={[styles.themeToggleCard, {backgroundColor: theme.surface, borderColor: theme.border, marginTop: 10}]}>
-            <View style={{flexDirection: 'row', alignItems: 'center'}}>
-              <Ionicons name={isDarkMode ? "moon" : "sunny"} size={26} color={isDarkMode ? theme.accent : theme.warning} />
-              <Text style={{color: theme.text, fontWeight: '700', fontSize: 17, marginLeft: 15}}>Dark Appearance</Text>
-            </View>
-            <Switch value={isDarkMode} onValueChange={() => { Haptics.selectionAsync(); setIsDarkMode(!isDarkMode); AsyncStorage.setItem('@dark_mode', JSON.stringify(!isDarkMode));}} trackColor={{ false: theme.border, true: theme.primary }} thumbColor={"#fff"} />
-          </View>
-
-          <TouchableOpacity style={[styles.themeToggleCard, {backgroundColor: theme.danger + '10', borderColor: theme.danger + '50', marginTop: 10}]} onPress={purgeAllNotices}>
-            <View style={{flexDirection: 'row', alignItems: 'center'}}>
-              <Ionicons name="skull" size={26} color={theme.danger} />
-              <View style={{marginLeft: 15}}>
-                <Text style={{color: theme.danger, fontWeight: '800', fontSize: 17}}>Purge Database</Text>
-                <Text style={{color: theme.danger, opacity: 0.8, fontSize: 13, marginTop: 2}}>Permanently delete all network notices.</Text>
-              </View>
-            </View>
-          </TouchableOpacity>
-
-          <TouchableOpacity style={{marginTop: 30, flexDirection: 'row', alignItems: 'center', backgroundColor: theme.surface, paddingVertical: 18, paddingHorizontal: 35, borderRadius: 20, borderWidth: 0.5, borderColor: theme.border, alignSelf: 'center'}} onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); AsyncStorage.clear(); setUserName(''); setShowAuthModal(true); setPassword(''); setTempName(''); setTempRollNo(''); setRollNo(''); setIsAdmin(false); }}>
-            <Ionicons name="log-out-outline" size={22} color={theme.danger} />
-            <Text style={{color: theme.danger, fontSize: 16, fontWeight: '700', marginLeft: 10}}>Sign Out Root Access</Text>
-          </TouchableOpacity>
         </ScrollView>
       )}
 
-      {/* STUDENT PROFILE TAB */}
-      {activeTab === 'profile' && !isAdmin && (
+      {/* PROFILE TAB */}
+      {activeTab === 'profile' && (
         <ScrollView style={styles.screenContainer} contentContainerStyle={{padding: 20, alignItems: 'center', paddingBottom: 140 + insets.bottom}}>
-          
-          <View style={[styles.idCard, {backgroundColor: theme.surface, borderColor: theme.border}]}>
-            <View style={[styles.bigAvatar, {backgroundColor: theme.primary}]}>
-              <Text style={[styles.bigAvatarText, userEmoji && {fontSize: 60}]}>{displayAvatar}</Text>
+          <View style={[styles.idCard, {backgroundColor: theme.surface}]}>
+            <TouchableOpacity hitSlop={{top: 15, bottom: 15, left: 15, right: 15}} style={{position: 'absolute', top: 15, right: 15, padding: 8, backgroundColor: theme.bg, borderRadius: 20}} onPress={openEditProfile}><Ionicons name="pencil" size={18} color={theme.text} /></TouchableOpacity>
+            <View style={[styles.bigAvatar, {backgroundColor: theme.bg}]}>
+              {currentUser?.avatar_url ? (
+                <Image source={{uri: currentUser.avatar_url}} style={{width: '100%', height: '100%'}} />
+              ) : (
+                <Ionicons name="person" size={50} color={theme.subText} />
+              )}
             </View>
-            <View style={{alignItems: 'center', marginTop: 15}}>
-              <Text style={[styles.profileName, {color: theme.text}]}>{userName}</Text>
-              {rollNo ? <Text style={{color: theme.subText, fontSize: 16, fontWeight: '600', marginTop: 4, letterSpacing: 1}}>{rollNo}</Text> : null}
-              <Text style={{color: theme.subText, fontSize: 13, fontWeight: '700', marginTop: 8, letterSpacing: 1.5, textTransform: 'uppercase'}}>Verified Student</Text>
-            </View>
-          </View>
-
-          <View style={[styles.themeToggleCard, {backgroundColor: theme.surface, borderColor: theme.border, flexDirection: 'column', alignItems: 'flex-start'}]}>
-            <Text style={{color: theme.text, fontWeight: '700', fontSize: 16, marginBottom: 15}}>Identity & Emoji</Text>
-            
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{paddingBottom: 15}}>
-              {AVATAR_EMOJIS.map((emoji) => {
-                const isActive = (emoji === 'Aa' && !userEmoji) || emoji === userEmoji;
-                return (
-                  <TouchableOpacity key={emoji} onPress={() => changeUserEmoji(emoji)} style={[styles.emojiSwatch, {backgroundColor: isActive ? theme.border : 'transparent'}]}>
-                    <Text style={{fontSize: 26, fontWeight: '800', color: theme.text}}>{emoji}</Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{paddingBottom: 5}}>
-              {AVATAR_COLORS.map((color) => (
-                <TouchableOpacity key={color} onPress={() => changeUserColor(color)} style={[styles.colorSwatch, {backgroundColor: color, borderColor: theme.border, borderWidth: userColor === color ? 3 : 1}]}>
-                  {userColor === color && <Ionicons name="checkmark" size={18} color={color === '#FFFFFF' ? '#000' : '#fff'} />}
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-          </View>
-
-          <View style={[styles.themeToggleCard, {backgroundColor: theme.surface, borderColor: theme.border}]}>
-            <View style={{flexDirection: 'row', alignItems: 'center'}}>
-              <Ionicons name={isDarkMode ? "moon" : "sunny"} size={26} color={isDarkMode ? theme.accent : theme.warning} />
-              <Text style={{color: theme.text, fontWeight: '700', fontSize: 17, marginLeft: 15}}>Dark Appearance</Text>
-            </View>
-            <Switch value={isDarkMode} onValueChange={() => { Haptics.selectionAsync(); setIsDarkMode(!isDarkMode); AsyncStorage.setItem('@dark_mode', JSON.stringify(!isDarkMode));}} trackColor={{ false: theme.border, true: theme.primary }} thumbColor={"#fff"} />
+            <Text style={[styles.profileName, {color: theme.text}]}>{currentUser?.full_name}</Text>
+            <Text style={{color: theme.subText, fontSize: 16, marginTop: 4}}>{currentUser?.roll_no}</Text>
           </View>
           
-          <View style={[styles.statsRow, {backgroundColor: theme.surface, borderColor: theme.border}]}>
-            <View style={styles.statBox}>
-              <Text style={[styles.statNumber, {color: theme.text}]}>{savedNotices.length}</Text>
-              <Text style={[styles.statLabel, {color: theme.subText}]}>Bookmarks</Text>
+          <View style={[styles.insetGroup, {backgroundColor: theme.surface}]}>
+            <View style={[styles.insetItem, {borderBottomWidth: StyleSheet.hairlineWidth, borderColor: theme.border}]}>
+              <View style={{flexDirection: 'row', alignItems: 'center'}}><Ionicons name="moon" size={24} color={theme.accent} /><Text style={{color: theme.text, fontSize: 17, marginLeft: 15}}>Dark Appearance</Text></View>
+              <Switch value={isDarkMode} onValueChange={() => setIsDarkMode(!isDarkMode)} />
             </View>
-            <View style={[styles.statBox, {borderLeftWidth: 0.5, borderColor: theme.border}]}>
-              <Text style={[styles.statNumber, {color: theme.text}]}>{notices.filter(n => n.likedBy.includes(userName)).length}</Text>
-              <Text style={[styles.statLabel, {color: theme.subText}]}>Interactions</Text>
-            </View>
+            <TouchableOpacity style={styles.insetItem} onPress={handleLogout}>
+              <View style={{flexDirection: 'row', alignItems: 'center'}}><Ionicons name="log-out" size={24} color={theme.danger} /><Text style={{color: theme.danger, fontSize: 17, marginLeft: 15}}>Sign Out</Text></View>
+            </TouchableOpacity>
           </View>
-
-          <TouchableOpacity style={{marginTop: 40, flexDirection: 'row', alignItems: 'center', backgroundColor: theme.surface, paddingVertical: 18, paddingHorizontal: 35, borderRadius: 20, borderWidth: 0.5, borderColor: theme.border}} onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); AsyncStorage.clear(); setUserName(''); setShowAuthModal(true); setPassword(''); setTempName(''); setTempRollNo(''); setRollNo(''); }}>
-            <Ionicons name="log-out-outline" size={22} color={theme.danger} />
-            <Text style={{color: theme.danger, fontSize: 16, fontWeight: '700', marginLeft: 10}}>Sign Out Session</Text>
-          </TouchableOpacity>
         </ScrollView>
       )}
 
-      {/* BILLION DOLLAR FLOATING PILL NAV */}
-      <View style={[styles.floatingNavContainer, { bottom: insets.bottom > 0 ? insets.bottom + 10 : 25, shadowColor: isDarkMode ? '#000' : '#888' }]}>
-        <BlurView intensity={isDarkMode ? 60 : 90} tint={isDarkMode ? "dark" : "light"} style={[styles.floatingNav, {backgroundColor: isDarkMode ? 'rgba(28,28,30,0.75)' : 'rgba(255,255,255,0.75)', borderColor: theme.border}]}>
-          <TouchableOpacity style={styles.navTab} onPress={() => switchTab('feed')}>
-            <Animated.View style={{ transform: [{ scale: navAnimFeed }] }}>
-              {notices.length > 0 && activeTab !== 'feed' && (
-                <View style={{position: 'absolute', top: -2, right: -2, width: 12, height: 12, borderRadius: 6, backgroundColor: theme.danger, borderWidth: 2, borderColor: theme.surface, zIndex: 10}} />
-              )}
-              <Ionicons name={activeTab === 'feed' ? "home" : "home-outline"} size={26} color={activeTab === 'feed' ? theme.primary : theme.subText} />
-            </Animated.View>
-          </TouchableOpacity>
-          
-          {isAdmin && (
-            <TouchableOpacity style={styles.navTab} onPress={() => switchTab('publish')}>
-              <View style={[styles.publishNavBtn, {backgroundColor: theme.accent}]}>
-                <Ionicons name="add" size={28} color="#fff" />
-              </View>
-            </TouchableOpacity>
-          )}
-
-          <TouchableOpacity style={styles.navTab} onPress={() => switchTab(isAdmin ? 'dashboard' : 'profile')}>
-            <Animated.View style={{ transform: [{ scale: navAnimProfile }] }}>
-              {isAdmin ? (
-                <MaterialCommunityIcons name={activeTab === 'dashboard' ? "shield-account" : "shield-account-outline"} size={28} color={activeTab === 'dashboard' ? theme.primary : theme.subText} />
-              ) : (
-                <Ionicons name={activeTab === 'profile' ? "person" : "person-outline"} size={26} color={activeTab === 'profile' ? theme.primary : theme.subText} />
-              )}
-            </Animated.View>
-          </TouchableOpacity>
+      {/* Web-Safe FLOATING NAV */}
+      <View style={[styles.floatingNavContainer, { bottom: insets.bottom > 0 ? insets.bottom : 20 }]}>
+        <BlurView intensity={isDarkMode ? 80 : 100} tint={Platform.OS === 'ios' ? (isDarkMode ? "prominent" : "prominent") : (isDarkMode ? "dark" : "light")} style={[styles.floatingNav, {borderColor: theme.border, borderWidth: 0.5}]}>
+          <TouchableOpacity hitSlop={{top: 10, bottom: 10, left: 10, right: 10}} style={styles.navTab} onPress={() => switchTab('feed')}><Ionicons name={activeTab === 'feed' ? "home" : "home-outline"} size={26} color={activeTab === 'feed' ? theme.primary : theme.subText} /></TouchableOpacity>
+          {isAdmin && <TouchableOpacity hitSlop={{top: 10, bottom: 10, left: 10, right: 10}} style={styles.navTab} onPress={() => switchTab('dashboard')}><Ionicons name={activeTab === 'dashboard' ? "stats-chart" : "stats-chart-outline"} size={26} color={activeTab === 'dashboard' ? theme.primary : theme.subText} /></TouchableOpacity>}
+          {isAdmin && <TouchableOpacity hitSlop={{top: 10, bottom: 10, left: 10, right: 10}} style={styles.navTab} onPress={() => switchTab('publish')}><Ionicons name={activeTab === 'publish' ? "add-circle" : "add-circle-outline"} size={32} color={theme.primary} /></TouchableOpacity>}
+          <TouchableOpacity hitSlop={{top: 10, bottom: 10, left: 10, right: 10}} style={styles.navTab} onPress={() => switchTab('profile')}><Ionicons name={activeTab === 'profile' ? "person" : "person-outline"} size={26} color={activeTab === 'profile' ? theme.primary : theme.subText} /></TouchableOpacity>
         </BlurView>
       </View>
     </View>
@@ -976,97 +811,71 @@ function MainApp() {
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  authContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 25 },
-  iconBlur: { padding: 25, borderRadius: 35, marginBottom: 25 },
-  authTitle: { fontSize: 40, fontWeight: '800', letterSpacing: -1 },
-  authSub: { fontSize: 17, marginTop: 8, fontWeight: '500' },
-  authRoleBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 22, borderRadius: 24, borderWidth: 0.5, width: '100%' },
-  authRoleText: { fontSize: 19, fontWeight: '700', flex: 1, marginLeft: 15 },
-  authInput: { padding: 22, borderRadius: 24, fontSize: 17, borderWidth: 0.5, width: '100%', fontWeight: '600' },
-  passwordContainer: { flexDirection: 'row', alignItems: 'center', borderWidth: 0.5, borderRadius: 24, width: '100%', marginBottom: 30 },
-  passwordInput: { flex: 1, padding: 22, fontSize: 17, fontWeight: '600' },
-  authSubmitBtn: { padding: 22, borderRadius: 24, alignItems: 'center', width: '100%', shadowOffset: {width:0,height:8}, shadowOpacity: 0.2, shadowRadius: 12 },
-  authSubmitText: { color: '#fff', fontSize: 19, fontWeight: '800', letterSpacing: 0.5 },
-  
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end', paddingHorizontal: 20, paddingBottom: 20 },
-  staticHeader: { paddingHorizontal: 20, paddingBottom: 20, borderBottomWidth: 0.5, borderColor: '#38383A' },
-  headerTitle: { fontSize: 36, fontWeight: '800', letterSpacing: -1, marginTop: 4 },
-  headerAvatar: { width: 50, height: 50, borderRadius: 25, justifyContent: 'center', alignItems: 'center', position: 'absolute', right: 20, bottom: 15, shadowOffset: {width:0,height:4}, shadowOpacity: 0.2, shadowRadius: 6 },
-  adminDot: { position: 'absolute', right: 0, bottom: 0, width: 16, height: 16, borderRadius: 8, backgroundColor: '#34C759', borderWidth: 2, borderColor: '#000' },
-  
+  authContainer: { flex: 1, justifyContent: 'center', padding: 30 },
+  authTitle: { fontSize: 40, fontWeight: '800', letterSpacing: -1.5, textAlign: 'center' },
+  authSub: { fontSize: 17, marginTop: 8, textAlign: 'center' },
+  avatarUploadBtn: { alignItems: 'center', marginBottom: 30 },
+  avatarPlaceholder: { width: 100, height: 100, borderRadius: 50, justifyContent: 'center', alignItems: 'center' },
+  authInput: { padding: 20, borderRadius: 14, fontSize: 17, marginBottom: 15 },
+  authSubmitBtn: { padding: 20, borderRadius: 14, alignItems: 'center' },
+  authSubmitText: { color: '#fff', fontSize: 17, fontWeight: '700' },
+  headerTitle: { fontSize: 34, fontWeight: '800', letterSpacing: -1 },
+  headerAvatar: { width: 36, height: 36, borderRadius: 18, overflow: 'hidden' },
   screenContainer: { flex: 1 },
-  toast: { position: 'absolute', alignSelf: 'center', paddingVertical: 12, paddingHorizontal: 20, borderRadius: 30, flexDirection: 'row', alignItems: 'center', zIndex: 1000, shadowColor: '#000', shadowOffset: {width:0, height:6}, shadowOpacity: 0.15, shadowRadius: 10, elevation: 8 },
-  toastText: { fontWeight: '700', fontSize: 15, marginLeft: 10 },
-
-  searchContainer: { flexDirection: 'row', alignItems: 'center', marginTop: 5, marginBottom: 15, paddingHorizontal: 15, borderRadius: 20, borderWidth: 0.5 },
-  searchInput: { flex: 1, paddingVertical: 16, fontSize: 16, fontWeight: '500' },
-  chipScroll: { maxHeight: 50, marginBottom: 20 },
-  filterChip: { paddingHorizontal: 24, justifyContent: 'center', borderRadius: 20, marginRight: 10, borderWidth: 0.5, height: 44 },
-  filterChipText: { fontWeight: '700', fontSize: 14 },
-
-  // ULTIMATE ANTI-BLEED ARCHITECTURE
-  // The gap is created by transparent padding on the top of each list row, eliminating background color bleeding entirely.
-  rowPadding: { paddingTop: 20, backgroundColor: 'transparent' },
-  frontShadowBox: { shadowColor: '#000', shadowOffset: {width:0,height:4}, shadowOpacity: 0.08, shadowRadius: 15, elevation: 1, backgroundColor: 'transparent', borderRadius: 24 },
-  frontCardInner: { padding: 22, borderRadius: 24, overflow: 'hidden' },
-  
-  colorAccentStrip: { position: 'absolute', left: 0, top: 0, bottom: 0, width: 4 },
-  newDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#007AFF', marginLeft: 6 },
-
-  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 15, paddingLeft: 4 },
+  toast: { position: 'absolute', alignSelf: 'center', paddingVertical: 12, paddingHorizontal: 20, borderRadius: 20, flexDirection: 'row', alignItems: 'center', zIndex: 1000, shadowColor: '#000', shadowOffset: {width:0, height:4}, shadowOpacity: 0.2, shadowRadius: 8, elevation: 8 },
+  toastText: { fontWeight: '600', fontSize: 15, marginLeft: 8 },
+  searchContainer: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 15, borderRadius: 12, height: 44, marginBottom: 12 },
+  searchInput: { flex: 1, fontSize: 17 },
+  segmentedControl: { flexDirection: 'row', padding: 3, borderRadius: 10 },
+  segmentBtn: { flex: 1, paddingVertical: 8, borderRadius: 8, alignItems: 'center' },
+  segmentText: { fontSize: 14, fontWeight: '600' },
+  rowPadding: { paddingVertical: 8, backgroundColor: 'transparent' },
+  frontShadowBox: { shadowColor: '#000', shadowOffset: {width:0,height:2}, shadowOpacity: 0.05, shadowRadius: 8, elevation: 1 },
+  frontCardInner: { padding: 20, borderRadius: 20, overflow: 'hidden' },
+  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 15 },
   authorRow: { flexDirection: 'row', alignItems: 'center' },
-  avatar: { width: 44, height: 44, borderRadius: 22, justifyContent: 'center', alignItems: 'center', marginRight: 12 },
-  cardAuthor: { fontSize: 17, fontWeight: '700', letterSpacing: -0.3 },
-  badge: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8 },
-  badgeText: { fontSize: 11, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.2 },
-  cardTitle: { fontSize: 22, fontWeight: '700', marginBottom: 10, letterSpacing: -0.5, lineHeight: 28, paddingLeft: 4 },
-  cardDesc: { fontSize: 16, lineHeight: 24, marginBottom: 20, fontWeight: '400', paddingLeft: 4 },
-  cardFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderTopWidth: 0.5, paddingTop: 15, paddingLeft: 4 },
+  avatar: { width: 44, height: 44, borderRadius: 22, justifyContent: 'center', alignItems: 'center', marginRight: 12, overflow: 'hidden' },
+  cardAuthor: { fontSize: 17, fontWeight: '700', letterSpacing: -0.5 },
+  cardTitle: { fontSize: 20, fontWeight: '800', marginBottom: 8, lineHeight: 26, letterSpacing: -0.5 },
+  cardDesc: { fontSize: 16, lineHeight: 24, marginBottom: 15 },
+  cardImageContainer: { width: '100%', aspectRatio: 4/3, borderRadius: 12, marginBottom: 15, overflow: 'hidden', backgroundColor: 'transparent' },
+  cardImage: { width: '100%', height: '100%' },
+  expandedImageContainer: { width: '100%', aspectRatio: 1, borderRadius: 16, marginBottom: 20, overflow: 'hidden', backgroundColor: 'transparent' },
+  expandedImage: { width: '100%', height: '100%' },
+  eventBlock: { padding: 16, borderRadius: 12, flexDirection: 'row', alignItems: 'center', marginBottom: 15 },
+  rsvpBtn: { paddingHorizontal: 18, paddingVertical: 10, borderRadius: 10, borderWidth: 1, borderColor: '#007AFF' },
+  rsvpBtnText: { fontWeight: '700', color: '#007AFF', fontSize: 14 },
+  cardFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderTopWidth: StyleSheet.hairlineWidth, paddingTop: 15 },
   actionRow: { flexDirection: 'row', alignItems: 'center' },
-  actionBtn: { flexDirection: 'row', alignItems: 'center', paddingVertical: 6, paddingRight: 20 },
+  actionBtn: { flexDirection: 'row', alignItems: 'center', paddingRight: 24 },
   actionText: { marginLeft: 6, fontWeight: '600', fontSize: 16 },
-
-  // The hidden layer is trapped perfectly inside the 24px corner curve, forced to match the inner card size.
-  hiddenRowInner: { flex: 1, flexDirection: 'row', justifyContent: 'space-between', borderRadius: 24, overflow: 'hidden' },
-  hiddenBtnLeft: { width: 80, justifyContent: 'center', alignItems: 'center' },
-  hiddenBtnRight: { width: 90, justifyContent: 'center', alignItems: 'center' },
-
-  emptyState: { alignItems: 'center', justifyContent: 'center', marginTop: 100, opacity: 0.6 },
-  
-  subLabel: { fontSize: 16, fontWeight: '700', marginTop: 10, marginBottom: 12 },
-  input: { padding: 20, borderRadius: 24, marginBottom: 20, fontSize: 17, borderWidth: 0.5, fontWeight: '500' },
-  categoryRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 35 },
-  catBtn: { paddingVertical: 16, borderRadius: 20, borderWidth: 0.5, flex: 1, marginHorizontal: 5, alignItems: 'center' },
-  publishBtn: { padding: 20, borderRadius: 24, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', shadowOffset: {width:0, height:8}, shadowOpacity: 0.2, shadowRadius: 12 },
-  publishBtnText: { color: '#fff', fontWeight: '700', fontSize: 18, letterSpacing: 0.3 },
-
-  dashboardCard: { flex: 1, padding: 20, borderRadius: 20, borderWidth: 0.5, marginHorizontal: 5, alignItems: 'center' },
-  dashboardNum: { fontSize: 32, fontWeight: '800', marginTop: 10, marginBottom: 4 },
-  dashboardLabel: { color: '#8E8E93', fontSize: 12, fontWeight: '700', textTransform: 'uppercase' },
-
-  idCard: { width: '100%', padding: 30, borderRadius: 28, borderWidth: 0.5, alignItems: 'center', marginBottom: 30, shadowOffset: {width:0,height:10}, shadowOpacity: 0.05, shadowRadius: 20 },
-  bigAvatar: { width: 100, height: 100, borderRadius: 50, justifyContent: 'center', alignItems: 'center', shadowOffset: {width:0,height:8}, shadowOpacity: 0.2, shadowRadius: 12 },
-  bigAvatarText: { color: '#fff', fontSize: 40, fontWeight: '800' },
-  profileName: { fontSize: 28, fontWeight: '800', letterSpacing: -0.5 },
-
-  themeToggleCard: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', width: '100%', padding: 24, borderRadius: 24, borderWidth: 0.5, marginBottom: 20 },
-  
-  emojiSwatch: { width: 54, height: 54, borderRadius: 27, marginRight: 10, justifyContent: 'center', alignItems: 'center' },
-  colorSwatch: { width: 44, height: 44, borderRadius: 22, marginRight: 12, justifyContent: 'center', alignItems: 'center' },
-  
-  statsRow: { flexDirection: 'row', justifyContent: 'space-around', width: '100%', paddingVertical: 24, borderRadius: 24, borderWidth: 0.5 },
-  statBox: { flex: 1, alignItems: 'center' },
-  statNumber: { fontSize: 32, fontWeight: '700', marginBottom: 6 },
-  statLabel: { fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.8 },
-
-  floatingNavContainer: { position: 'absolute', left: 20, right: 20, shadowOffset: {width:0, height:10}, shadowOpacity: 0.15, shadowRadius: 20 },
-  floatingNav: { flexDirection: 'row', borderRadius: 35, paddingVertical: 12, justifyContent: 'space-around', alignItems: 'center', borderWidth: 0.5, overflow: 'hidden' },
-  navTab: { alignItems: 'center', justifyContent: 'center', width: 70 },
-  publishNavBtn: { width: 54, height: 54, borderRadius: 27, justifyContent: 'center', alignItems: 'center', shadowOffset: {width:0,height:5}, shadowOpacity: 0.2, shadowRadius: 8 },
-
-  pageSheetOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
-  pageSheetContent: { height: '90%', borderTopLeftRadius: 35, borderTopRightRadius: 35, shadowColor: '#000', shadowOffset: {width: 0, height: -10}, shadowOpacity: 0.1, shadowRadius: 20 },
-  dragIndicator: { width: 45, height: 5, backgroundColor: '#8E8E93', borderRadius: 3, alignSelf: 'center', marginBottom: 25 },
-  expandedTitle: { fontSize: 34, fontWeight: '800', marginBottom: 20, letterSpacing: -1, lineHeight: 40 },
-  expandedDesc: { fontSize: 19, lineHeight: 32, fontWeight: '400' },
+  subLabel: { fontSize: 13, fontWeight: '700', marginTop: 15, marginBottom: 8, marginLeft: 5, letterSpacing: 0.5 },
+  input: { padding: 18, borderRadius: 14, marginBottom: 20, fontSize: 17 },
+  categoryRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 20 },
+  catBtn: { paddingVertical: 14, borderRadius: 12, flex: 1, marginHorizontal: 4, alignItems: 'center' },
+  uploadBox: { height: 200, borderRadius: 14, justifyContent: 'center', alignItems: 'center', marginBottom: 25, overflow: 'hidden' },
+  previewImage: { width: '100%', height: '100%' },
+  publishBtn: { padding: 18, borderRadius: 14, alignItems: 'center', shadowOffset: {width:0,height:4}, shadowOpacity: 0.2, shadowRadius: 8 },
+  publishBtnText: { color: '#fff', fontWeight: '700', fontSize: 17 },
+  idCard: { width: '100%', padding: 30, borderRadius: 20, alignItems: 'center', marginBottom: 25 },
+  bigAvatar: { width: 100, height: 100, borderRadius: 50, justifyContent: 'center', alignItems: 'center', marginBottom: 15, overflow: 'hidden' },
+  profileName: { fontSize: 26, fontWeight: '800', letterSpacing: -0.5 },
+  insetGroup: { width: '100%', borderRadius: 16, overflow: 'hidden', marginTop: 10 },
+  insetItem: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 18 },
+  gridContainer: { width: '100%' },
+  gridRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10 },
+  dashboardCard: { flex: 1, padding: 20, borderRadius: 16, marginHorizontal: 5 },
+  dashboardNum: { fontSize: 32, fontWeight: '800', marginTop: 10, letterSpacing: -1 },
+  dashboardLabel: { color: '#8E8E93', fontSize: 13, fontWeight: '700', marginTop: 4 },
+  floatingNavContainer: { position: 'absolute', left: 25, right: 25, shadowOffset: {width:0, height:8}, shadowOpacity: 0.15, shadowRadius: 20 },
+  floatingNav: { flexDirection: 'row', borderRadius: 25, paddingVertical: 12, justifyContent: 'space-around', alignItems: 'center', overflow: 'hidden' },
+  navTab: { alignItems: 'center', justifyContent: 'center', width: 60 },
+  pageSheetContent: { borderTopLeftRadius: 10, borderTopRightRadius: 10 },
+  expandedTitle: { fontSize: 30, fontWeight: '800', marginBottom: 20, lineHeight: 36, letterSpacing: -1 },
+  expandedDesc: { fontSize: 18, lineHeight: 28 },
+  emptyState: { alignItems: 'center', justifyContent: 'center', marginTop: 100, opacity: 0.5 },
+  actionOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end', padding: 20 },
+  actionSheetInner: { borderRadius: 14, overflow: 'hidden' },
+  actionSheetBtn: { paddingVertical: 18, alignItems: 'center' },
+  actionSheetText: { fontSize: 20, fontWeight: '600' }
 });
